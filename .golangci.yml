@@ -1,0 +1,53 @@
+# golangci-lint configuration (v2 schema).
+# Run locally with `just lint`; CI lints every GOOS so platform-specific files
+# (Seatbelt/darwin, AppContainer/windows, gVisor/linux) are all analyzed.
+version: "2"
+
+run:
+  # Lint test files too; the suite is a first-class part of the package.
+  tests: true
+
+linters:
+  # Start from the curated default set (errcheck, govet, ineffassign,
+  # staticcheck, unused) and add high-signal checks on top.
+  default: standard
+  enable:
+    - bodyclose      # HTTP/response bodies must be closed
+    - copyloopvar    # flag redundant loop-variable copies (Go 1.22+ semantics)
+    - errorlint      # correct error wrapping / comparison
+    - misspell       # common English typos in comments and strings
+    - nilerr         # `return nil` after a non-nil error
+    - unconvert      # redundant type conversions
+    - usestdlibvars  # prefer stdlib constants over magic strings
+    - wastedassign   # assignments whose value is never used
+
+  settings:
+    errcheck:
+      # Win32 teardown calls are fire-and-forget on cleanup/failure paths;
+      # their return value carries no actionable signal.
+      exclude-functions:
+        - golang.org/x/sys/windows.CloseHandle
+        - golang.org/x/sys/windows.FreeSid
+        - golang.org/x/sys/windows.TerminateProcess
+        - (*golang.org/x/sys/windows.LazyProc).Call
+    misspell:
+      locale: US
+
+  exclusions:
+    # Built-in presets that drop well-known, intentional non-errors.
+    presets:
+      - std-error-handling   # unchecked Fprint*/Close/Flush on stdio + cleanups
+      - common-false-positives
+    rules:
+      # These files are cross-platform build-tag scaffolding: they are compiled
+      # on every GOOS so the runtime dispatch type-checks, but their symbols are
+      # only referenced from //go:build linux code. `unused` cannot see across
+      # build tags, so it reports false positives on darwin/windows builds.
+      - path: '(linux_view\.go|cow_linux_runtime_unsupported\.go)'
+        linters:
+          - unused
+      # Tests routinely ignore best-effort teardown errors (e.g. deferred
+      # cleanup funcs) and assert failures via t.Fatal instead.
+      - path: '_test\.go'
+        linters:
+          - errcheck

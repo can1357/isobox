@@ -1,0 +1,57 @@
+name: Bug report
+description: Report incorrect behavior (not a confinement bypass — see Security)
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Suspected sandbox escape or enforcement bypass? Do **not** file it here.
+        Report it privately per [SECURITY.md](../blob/main/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: The exact isobox command and, if relevant, the target command.
+      placeholder: isobox --net=disable -- curl https://example.com
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: plan
+    attributes:
+      label: Compiled plan
+      description: Output of the same invocation with `--print` added.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: isobox version
+      description: Output of `isobox --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - seatbelt (macOS)
+        - gvisor (Linux)
+        - appcontainer (Windows)
+        - docker-ephemeral
+        - not sure
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Host OS and version
+      placeholder: macOS 15.5 / Ubuntu 24.04 / Windows 11
+    validations:
+      required: true

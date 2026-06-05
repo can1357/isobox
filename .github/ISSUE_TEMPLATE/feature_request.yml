@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest a capability, flag, or backend behavior
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that isobox does not support today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: |
+        What should isobox do? If it maps to a capability, note how it should
+        behave on each backend and whether it belongs in the portable
+        intersection or only some backends (with a caveat).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
