@@ -1,0 +1,33 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Go is gofmt-canonical: tabs for indentation.
+[*.go]
+indent_style = tab
+indent_size = 4
+
+[go.mod]
+indent_style = tab
+
+# C preload matches .clang-format (4-space indent, 100 columns).
+[*.{c,h}]
+indent_style = space
+indent_size = 4
+max_line_length = 100
+
+[justfile]
+indent_style = space
+indent_size = 4
+
+[Makefile]
+indent_style = tab
+
+[*.md]
+trim_trailing_whitespace = false

@@ -1,0 +1,45 @@
+# ---- Go ----
+# Binaries
+/isobox
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+# Test binary and coverage
+*.test
+*.out
+coverage.*
+# Go workspace
+go.work
+go.work.sum
+# Vendored deps
+/vendor/
+
+
+# ---- C ----
+*.o
+*.a
+*.lo
+*.la
+*.obj
+*.lib
+*.gch
+*.pch
+*.d
+*.dSYM/
+*.su
+*.idb
+core
+
+# ---- Build output ----
+/bin/
+/build/
+/dist/
+
+# ---- Editors / OS ----
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
