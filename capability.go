@@ -24,6 +24,9 @@ const (
 	// private IPC, no host mounts unless explicitly scoped, and disposable Docker
 	// storage/tmpfs for backend scratch.
 	BackendDockerEphemeral Backend = "docker-ephemeral"
+	// BackendDockerRunscEphemeral is Docker run --rm with the gVisor runsc
+	// runtime forced and verified at launch.
+	BackendDockerRunscEphemeral Backend = "docker-runsc-ephemeral"
 )
 
 // Capability is a single, named sandboxing guarantee. A backend either supports
@@ -117,6 +120,7 @@ var backendCaps = map[Backend]CapabilitySet{
 		CapFSWriteEphemeral,
 		CapFSWriteScope,
 		CapProcNoExec,
+		CapIPCRestrict,
 		CapResCPU, CapResMemory,
 	),
 	BackendDockerEphemeral: NewCapabilitySet(
@@ -125,6 +129,15 @@ var backendCaps = map[Backend]CapabilitySet{
 		CapFSWriteEphemeral,
 		CapFSReadScope, CapFSWriteScope,
 		CapIPCRestrict,
+		CapResCPU, CapResMemory,
+	),
+	BackendDockerRunscEphemeral: NewCapabilitySet(
+		CapNetDisable, CapNetEnable, CapNetOutbound,
+		CapFSWriteDeny,
+		CapFSWriteEphemeral,
+		CapFSReadScope, CapFSWriteScope,
+		CapIPCRestrict,
+		CapKernelIsolation,
 		CapResCPU, CapResMemory,
 	),
 }
@@ -218,16 +231,29 @@ func Union() CapabilitySet {
 	return out
 }
 
-// Intersection returns capabilities supported by every backend. A spec built
-// only from these behaves identically on all platforms.
+// Intersection returns capabilities supported by every supported host OS after
+// accounting for auto-selectable compatibility backends on that OS. In other
+// words, it is:
+//
+//	(union of macOS-compatible backends)
+//	∩ (union of Linux-compatible backends)
+//	∩ (union of Windows-compatible backends)
+//
+// A Strict spec may use these capabilities without being tied to one named
+// backend, though the selected optional backend still has to exist at runtime.
 func Intersection() CapabilitySet {
-	bs := Backends()
-	if len(bs) == 0 {
-		return NewCapabilitySet()
-	}
-	out := CapsOf(bs[0])
-	for _, b := range bs[1:] {
-		out = out.Intersect(backendCaps[b])
+	oses := []string{"darwin", "linux", "windows"}
+	out := NewCapabilitySet()
+	for i, goos := range oses {
+		union := NewCapabilitySet()
+		for _, b := range backendCandidatesForGOOS(goos) {
+			union = union.Union(CapsOf(b))
+		}
+		if i == 0 {
+			out = union
+			continue
+		}
+		out = out.Intersect(union)
 	}
 	return out
 }

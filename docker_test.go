@@ -3,6 +3,7 @@ package isobox
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -71,13 +72,62 @@ func TestDockerRuntimeEnvInsertion(t *testing.T) {
 	}
 }
 
-func TestDockerRunnerUsesDockerOverrideEnv(t *testing.T) {
-	r, err := runnerFor(BackendDockerEphemeral)
+func TestDockerRunscBackendForcesRuntimeAndClaimsKernelIsolation(t *testing.T) {
+	t.Setenv(dockerImageEnv, "alpine")
+	t.Setenv(dockerRunscRuntimeEnv, "")
+	p, err := compileDockerRunscEphemeral(Spec{Args: []string{"true"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.binEnv != "ISOBOX_DOCKER" {
-		t.Fatalf("docker runner binEnv=%q", r.binEnv)
+	if p.Backend != BackendDockerRunscEphemeral {
+		t.Fatalf("backend=%s, want %s", p.Backend, BackendDockerRunscEphemeral)
+	}
+	if !hasArgPair(p.Argv, "--runtime", "runsc") {
+		t.Fatalf("docker-runsc backend must force --runtime runsc: %v", p.Argv)
+	}
+	if !p.Uses.Has(CapKernelIsolation) {
+		t.Fatalf("docker-runsc backend must claim kernel.isolation: %v", p.Uses.List())
+	}
+	if !caveatsContain(p.Caveats, "forces Docker runtime") {
+		t.Fatalf("missing forced-runtime caveat: %v", p.Caveats)
+	}
+
+	t.Setenv(dockerRunscRuntimeEnv, "runsc-custom")
+	p, err = compileDockerRunscEphemeral(Spec{Args: []string{"true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgPair(p.Argv, "--runtime", "runsc-custom") {
+		t.Fatalf("custom runsc runtime not inserted: %v", p.Argv)
+	}
+}
+
+func TestDockerRunscRuntimeInfoParsing(t *testing.T) {
+	if !dockerRuntimeInfoHas(`{"io.containerd.runc.v2":{},"runsc":{"path":"runsc"}}`, "runsc") {
+		t.Fatal("expected runsc runtime to be detected")
+	}
+	if dockerRuntimeInfoHas(`{"runc":{}}`, "runsc") || dockerRuntimeInfoHas(`not-json`, "runsc") {
+		t.Fatal("unexpected runsc runtime detection")
+	}
+	runtime, ok := dockerRunRuntime([]string{dockerBinary, "run", "--rm", "--runtime", "runsc", "alpine", "true"})
+	if !ok || runtime != "runsc" {
+		t.Fatalf("dockerRunRuntime split flag=%q,%v", runtime, ok)
+	}
+	runtime, ok = dockerRunRuntime([]string{dockerBinary, "run", "--runtime=runsc-custom", "alpine", "true"})
+	if !ok || runtime != "runsc-custom" {
+		t.Fatalf("dockerRunRuntime equals flag=%q,%v", runtime, ok)
+	}
+}
+
+func TestDockerRunnerUsesDockerOverrideEnv(t *testing.T) {
+	for _, backend := range []Backend{BackendDockerEphemeral, BackendDockerRunscEphemeral} {
+		r, err := runnerFor(backend)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.binEnv != "ISOBOX_DOCKER" {
+			t.Fatalf("%s runner binEnv=%q", backend, r.binEnv)
+		}
 	}
 }
 
@@ -149,6 +199,7 @@ func TestDockerOutboundSeccompMaterialization(t *testing.T) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
+
 	}
 	var profile struct {
 		DefaultAction string `json:"defaultAction"`
@@ -197,6 +248,62 @@ func TestDockerReadOnlyImageVolumePolicy(t *testing.T) {
 	want := []string{"/data", "/ro/cache"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("volume violations=%v, want %v", got, want)
+	}
+}
+
+func TestDockerImageInspectParsingAndRewrite(t *testing.T) {
+	id, volumes, err := parseDockerImageInspect([]byte(`[{"Id":"sha256:abc","Config":{"Volumes":{"/data":{},"tmp/cache":{}}}}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "sha256:abc" {
+		t.Fatalf("image id=%q", id)
+	}
+	if !reflect.DeepEqual(volumes, []string{"/data", "/tmp/cache"}) && !reflect.DeepEqual(volumes, []string{"/tmp/cache", "/data"}) {
+		t.Fatalf("volumes=%v", volumes)
+	}
+	argv := []string{dockerBinary, "run", "--rm", "--read-only", "alpine:latest", "true"}
+	idx, ok := dockerRunImageIndex(argv)
+	if !ok {
+		t.Fatal("missing image index")
+	}
+	rewritten := append([]string(nil), argv...)
+	rewritten[idx] = id
+	if image, ok := dockerRunImage(rewritten); !ok || image != id {
+		t.Fatalf("rewritten image=%q,%v argv=%v", image, ok, rewritten)
+	}
+}
+
+func TestDockerReadDenyMaskMaterialization(t *testing.T) {
+	t.Setenv(dockerImageEnv, "alpine")
+	deniedFile := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(deniedFile, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deniedDir := t.TempDir()
+	p, err := compileDockerEphemeral(Spec{Args: []string{"true"}, ReadDeny: []string{deniedFile, deniedDir}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv, cleanup, err := materializeDockerReadDenyMasks(p.Argv, p.docker.ReadDeny)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil {
+		t.Fatal("expected read-deny mask cleanup")
+	}
+	defer cleanup()
+	if !hasDockerMountDestination(argv, cleanDockerContainerPath(canonPath(deniedFile))) || !hasDockerMountDestination(argv, cleanDockerContainerPath(canonPath(deniedDir))) {
+		t.Fatalf("read-deny mask mounts missing: %v", argv)
+	}
+	imageIdx, ok := dockerRunImageIndex(argv)
+	if !ok {
+		t.Fatalf("missing docker image after mask insertion: %v", argv)
+	}
+	for i := 0; i < imageIdx; i++ {
+		if argv[i] == "alpine" {
+			t.Fatalf("mask mounts inserted after image: %v", argv)
+		}
 	}
 }
 
@@ -364,8 +471,8 @@ func TestDockerWriteOverlayAndReadDenyCaveatsDegrade(t *testing.T) {
 	if !caveatsContain(p.Caveats, "no hybrid shadow layer") {
 		t.Fatalf("missing WriteOverlay degradation caveat: %v", p.Caveats)
 	}
-	if !caveatsContain(p.Caveats, "read-deny paths are not applied") {
-		t.Fatalf("missing read-deny caveat: %v", p.Caveats)
+	if !caveatsContain(p.Caveats, "path masks") {
+		t.Fatalf("missing read-deny mask caveat: %v", p.Caveats)
 	}
 	if !hasArgPair(p.Argv, "--mount", "type=bind,src=/host/out,dst=/host/out") {
 		t.Fatalf("missing writable overlay bind mount: %v", p.Argv)
@@ -393,6 +500,18 @@ func TestDockerWorkingDirectoryMustBeMounted(t *testing.T) {
 func hasArgPair(argv []string, key, value string) bool {
 	for i := 0; i+1 < len(argv); i++ {
 		if argv[i] == key && argv[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDockerMountDestination(argv []string, dst string) bool {
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] != "--mount" {
+			continue
+		}
+		if dockerMountDestination(argv[i+1]) == dst {
 			return true
 		}
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/can1357/isobox"
@@ -84,5 +85,20 @@ func TestParseMachAllowFlag(t *testing.T) {
 	}
 	if args := fs.Args(); len(args) != 1 || args[0] != "echo" {
 		t.Fatalf("positional args=%v, want [echo]", args)
+	}
+}
+
+func TestNewRunnerAutoDelegatesToSelector(t *testing.T) {
+	r, err := newRunner("auto", isobox.Spec{Args: []string{"echo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]isobox.Backend{
+		"darwin":  isobox.BackendSeatbelt,
+		"linux":   isobox.BackendGvisor,
+		"windows": isobox.BackendAppContainer,
+	}[runtime.GOOS]
+	if want != "" && r.Backend() != want {
+		t.Fatalf("auto backend=%s, want %s", r.Backend(), want)
 	}
 }

@@ -333,11 +333,14 @@ func TestSeatbeltResourceLimitsCaveatedNotEnforced(t *testing.T) {
 	if p.Uses.Has(CapResCPU) || p.Uses.Has(CapResMemory) {
 		t.Fatalf("Seatbelt must not claim to enforce resource limits: %v", p.Uses.List())
 	}
-	if !caveatsContain(p.Caveats, "no CPU-limit mechanism") {
-		t.Fatalf("missing CPU caveat: %v", p.Caveats)
+	if p.resources == nil || p.resources.CPUs != 2 || p.resources.MemoryBytes != 1<<30 {
+		t.Fatalf("Seatbelt resource watchdog metadata missing: %#v", p.resources)
 	}
-	if !caveatsContain(p.Caveats, "no memory-limit mechanism") {
-		t.Fatalf("missing memory caveat: %v", p.Caveats)
+	if !caveatsContain(p.Caveats, "best-effort process-group duty-cycle watchdog") {
+		t.Fatalf("missing CPU watchdog caveat: %v", p.Caveats)
+	}
+	if !caveatsContain(p.Caveats, "best-effort process-group memory watchdog") {
+		t.Fatalf("missing memory watchdog caveat: %v", p.Caveats)
 	}
 }
 

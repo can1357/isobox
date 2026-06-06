@@ -98,6 +98,15 @@ func TestAppContainerNetworkCapabilities(t *testing.T) {
 					t.Errorf("unexpected SID %s in %v", sid, p.ac.CapabilitySIDs)
 				}
 			}
+			if !p.ac.LPAC || !profileHas(p.Profile, "all application packages: opt-out") {
+				t.Fatalf("AppContainer plans must opt out of ALL APPLICATION PACKAGES via LPAC:\n%s", p.Profile)
+			}
+			if tc.net == NetDisable && !p.Uses.Has(CapIPCRestrict) {
+				t.Fatalf("NetDisable AppContainer plan should claim ipc.restrict: %v", p.Uses.List())
+			}
+			if tc.net != NetDisable && p.Uses.Has(CapIPCRestrict) {
+				t.Fatalf("AppContainer plan with network capability SIDs must not claim ipc.restrict: %v", p.Uses.List())
+			}
 			if tc.net == NetOutbound {
 				if !p.Uses.Has(CapNetOutbound) {
 					t.Fatalf("outbound AppContainer plan should claim %s: %v", CapNetOutbound, p.Uses.List())
@@ -280,6 +289,12 @@ func TestAppContainerWriteModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !hasString(overlay.ac.ReadDeny, canonPath(filepath.Join(readable, "secret"))) {
+		t.Fatalf("missing overlay read-deny path in profile: %+v", overlay.ac)
+	}
+	if !profileHas(overlay.Profile, "read deny:") {
+		t.Fatalf("profile must render read-deny paths:\n%s", overlay.Profile)
+	}
 	if !overlay.Uses.Has(CapFSWriteScope) || overlay.Uses.Has(CapFSWriteEphemeral) {
 		t.Fatalf("overlay degrade capabilities wrong: %v", overlay.Uses.List())
 	}
@@ -292,8 +307,8 @@ func TestAppContainerWriteModes(t *testing.T) {
 	if !caveatContains(overlay.Caveats, "no ephemeral/shadow overlay") {
 		t.Fatalf("missing overlay degrade caveat: %v", overlay.Caveats)
 	}
-	if !caveatContains(overlay.Caveats, "cannot carve read-deny") {
-		t.Fatalf("missing read-deny caveat: %v", overlay.Caveats)
+	if !caveatContains(overlay.Caveats, "temporary DENY ACEs") {
+		t.Fatalf("missing read-deny ACL caveat: %v", overlay.Caveats)
 	}
 	if !caveatContains(overlay.Caveats, "ambient write access") {
 		t.Fatalf("WriteOverlay must caveat ambient writable ACLs: %v", overlay.Caveats)

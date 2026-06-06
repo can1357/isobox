@@ -50,11 +50,15 @@ func compileSeatbelt(s Spec) (*Plan, error) {
 
 	uses := NewCapabilitySet()
 	var caveats []string
+	var resources *resourceWatchdogPlan
+	if s.CPUs > 0 || s.MemoryBytes > 0 {
+		resources = &resourceWatchdogPlan{CPUs: s.CPUs, MemoryBytes: s.MemoryBytes}
+	}
 	if s.CPUs > 0 {
-		caveats = append(caveats, "Seatbelt has no CPU-limit mechanism; CPUs is ignored")
+		caveats = append(caveats, "Seatbelt has no kernel CPU quota; isobox applies a best-effort process-group duty-cycle watchdog outside strict capability accounting")
 	}
 	if s.MemoryBytes > 0 {
-		caveats = append(caveats, "Seatbelt has no memory-limit mechanism; MemoryBytes is ignored")
+		caveats = append(caveats, "Seatbelt has no kernel memory cap; isobox applies a best-effort process-group memory watchdog that can kill after an over-limit sample")
 	}
 	var b strings.Builder
 	// Start permissive, then carve away. In SBPL the last matching rule wins.
@@ -152,6 +156,8 @@ func compileSeatbelt(s Spec) (*Plan, error) {
 		sbplLiterals(&b, "allow", "file-write*", seatbeltDeviceWriteLiterals)
 		sbplSubpaths(&b, "allow", "file-write*", allow)
 		uses = uses.Union(NewCapabilitySet(CapFSWriteScope))
+		caveats = append(caveats,
+			"Seatbelt write-scope is path based; a hardlink inside a writable path can modify the same file object through an out-of-scope alias")
 	case WriteEphemeral:
 		b.WriteString(`(deny file-write* (subpath "/"))` + "\n")
 		sbplLiterals(&b, "allow", "file-write*", seatbeltDeviceWriteLiterals)
@@ -171,6 +177,8 @@ func compileSeatbelt(s Spec) (*Plan, error) {
 		uses = uses.Union(NewCapabilitySet(CapFSWriteScope))
 		caveats = append(caveats,
 			"Seatbelt cannot redirect writes outside writable paths to an ephemeral/shadow filesystem; those writes are denied")
+		caveats = append(caveats,
+			"Seatbelt write-scope is path based; a hardlink inside a writable path can modify the same file object through an out-of-scope alias")
 	}
 
 	if s.NoExec {
@@ -193,11 +201,12 @@ func compileSeatbelt(s Spec) (*Plan, error) {
 	argv := append([]string{"sandbox-exec", "-p", profile, cmd}, s.Args[1:]...)
 
 	plan := &Plan{
-		Backend: BackendSeatbelt,
-		Argv:    argv,
-		Profile: profile,
-		Uses:    uses,
-		Caveats: caveats,
+		Backend:   BackendSeatbelt,
+		Argv:      argv,
+		Profile:   profile,
+		Uses:      uses,
+		Caveats:   caveats,
+		resources: resources,
 	}
 	if s.Write == WriteEphemeral {
 		plan.fs = &fsVirtualizationPlan{

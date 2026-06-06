@@ -62,9 +62,9 @@ func run() int {
 		machAllow   stringList
 		noExec      = fs.Bool("no-exec", false, "forbid executing another program image")
 		allowTemp   = fs.Bool("allow-temp", false, "add the OS temp dir as a scoped write target; requires --write=scope or --write=overlay")
-		strict      = fs.Bool("strict", false, "reject non-portable capabilities (identical on all backends)")
+		strict      = fs.Bool("strict", false, "reject capabilities outside the per-OS portable intersection")
 		dir         = fs.String("dir", "", "working directory for the command")
-		backend     = fs.String("backend", "", "force a backend for inspection: "+backendChoices())
+		backend     = fs.String("backend", "auto", "backend: auto|"+backendChoices())
 		printOnly   = fs.Bool("print", false, "compile and print the plan; do not run")
 		showCaps    = fs.Bool("caps", false, "print the capability matrix and exit")
 		showVersion = fs.Bool("version", false, "print version information and exit")
@@ -139,7 +139,7 @@ func run() int {
 		spec.Write = isobox.WriteScope // --writable implies scoped writes outside the agent profile
 	}
 
-	runner, err := newRunner(*backend)
+	runner, err := newRunner(*backend, spec)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "isobox:", err)
 		return 1
@@ -166,9 +166,9 @@ func run() int {
 	return code
 }
 
-func newRunner(backend string) (*isobox.Runner, error) {
-	if backend == "" {
-		return isobox.New()
+func newRunner(backend string, spec isobox.Spec) (*isobox.Runner, error) {
+	if backend == "" || backend == "auto" {
+		return isobox.NewForSpec(spec)
 	}
 	return isobox.NewBackend(isobox.Backend(backend))
 }

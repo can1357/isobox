@@ -90,6 +90,7 @@ func compileGvisor(s Spec) (*Plan, error) {
 		if !preloadFallback {
 			uses = uses.Union(NewCapabilitySet(CapFSWriteScope))
 		}
+		caveats = append(caveats, "gvisor scoped writes are path/mount based; hardlinks or nested host mountpoints under writable paths can affect host objects outside the lexical scope")
 	case WriteOverlay:
 		flags = append(flags, "--overlay2=root:memory")
 		if !preloadFallback {
@@ -97,6 +98,7 @@ func compileGvisor(s Spec) (*Plan, error) {
 		}
 		caveats = append(caveats,
 			"gvisor overlay flag syntax varies by runsc version (used --overlay2=root:memory)")
+		caveats = append(caveats, "gvisor scoped writes are path/mount based; hardlinks or nested host mountpoints under writable paths can affect host objects outside the lexical scope")
 	}
 
 	if s.NoExec {

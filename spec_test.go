@@ -152,12 +152,12 @@ func TestSpecValidateResourceLimits(t *testing.T) {
 	if err := (Spec{Args: []string{"x"}, CPUs: 1.5, MemoryBytes: 1 << 20}).validate(); err != nil {
 		t.Errorf("valid resource limits rejected: %v", err)
 	}
-	// Resource limits are not portable (Seatbelt cannot enforce them), so Strict
-	// must reject them.
-	if err := (Spec{Args: []string{"x"}, CPUs: 1, Strict: true}).validate(); err == nil {
-		t.Error("strict must reject a CPU limit")
+	// Resource limits are portable across OS-compatible backend unions: macOS can
+	// use Docker/runsc, Linux can use gVisor/Docker, and Windows uses jobs.
+	if err := (Spec{Args: []string{"x"}, Readable: []string{"/work"}, CPUs: 1, Strict: true}).validate(); err != nil {
+		t.Errorf("strict should allow a portable CPU limit with scoped reads: %v", err)
 	}
-	if err := (Spec{Args: []string{"x"}, MemoryBytes: 1 << 20, Strict: true}).validate(); err == nil {
-		t.Error("strict must reject a memory limit")
+	if err := (Spec{Args: []string{"x"}, Readable: []string{"/work"}, MemoryBytes: 1 << 20, Strict: true}).validate(); err != nil {
+		t.Errorf("strict should allow a portable memory limit: %v", err)
 	}
 }

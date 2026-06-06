@@ -50,6 +50,8 @@ func runnerFor(b Backend) (*Runner, error) {
 		return &Runner{backend: b, compile: compileAppContainer, run: runAppContainer}, nil
 	case BackendDockerEphemeral:
 		return &Runner{backend: b, compile: compileDockerEphemeral, binEnv: "ISOBOX_DOCKER"}, nil
+	case BackendDockerRunscEphemeral:
+		return &Runner{backend: b, compile: compileDockerRunscEphemeral, binEnv: "ISOBOX_DOCKER"}, nil
 	default:
 		return nil, fmt.Errorf("isobox: unknown backend %q", b)
 	}
@@ -67,6 +69,22 @@ func New() (*Runner, error) {
 	default:
 		return nil, fmt.Errorf("isobox: no sandbox backend for GOOS %q (supported: darwin, linux, windows)", runtime.GOOS)
 	}
+}
+
+// NewForSpec returns the best runner available on the current host for s. It
+// prefers the native backend, but can select optional Docker backends when the
+// native backend cannot advertise the requested capabilities.
+func NewForSpec(s Spec) (*Runner, error) {
+	b, err := selectBackendForSpec(runtime.GOOS, s)
+	if err != nil {
+		return nil, err
+	}
+	return runnerFor(b)
+}
+
+// BackendForSpec reports which backend NewForSpec would select on this host.
+func BackendForSpec(s Spec) (Backend, error) {
+	return selectBackendForSpec(runtime.GOOS, s)
 }
 
 // NewBackend returns a Runner for a specific backend regardless of host OS. This
@@ -118,8 +136,17 @@ func runPlanExec(ctx context.Context, backend Backend, binEnv string, plan *Plan
 	if override := os.Getenv(binEnv); override != "" {
 		argv = append([]string{override}, argv[1:]...)
 	}
-	if backend == BackendDockerEphemeral {
-		if err := validateDockerReadOnlyImageVolumes(ctx, argv); err != nil {
+	if backend == BackendDockerEphemeral || backend == BackendDockerRunscEphemeral {
+		if backend == BackendDockerRunscEphemeral {
+			if err := validateDockerRunscRuntime(ctx, argv); err != nil {
+				if cleanupErr := cleanup(); cleanupErr != nil {
+					return -1, fmt.Errorf("isobox: preparing docker runsc runtime policy: %w", errors.Join(err, cleanupErr))
+				}
+				return -1, err
+			}
+		}
+		argv, err = lockDockerImageAndValidateVolumes(ctx, argv)
+		if err != nil {
 			if cleanupErr := cleanup(); cleanupErr != nil {
 				return -1, fmt.Errorf("isobox: preparing docker image volume policy: %w", errors.Join(err, cleanupErr))
 			}
@@ -139,6 +166,22 @@ func runPlanExec(ctx context.Context, backend Backend, binEnv string, plan *Plan
 				return errors.Join(priorCleanup(), seccompCleanup())
 			}
 		}
+		if plan.docker != nil && len(plan.docker.ReadDeny) > 0 {
+			var readDenyCleanup func() error
+			argv, readDenyCleanup, err = materializeDockerReadDenyMasks(argv, plan.docker.ReadDeny)
+			if err != nil {
+				if cleanupErr := cleanup(); cleanupErr != nil {
+					return -1, fmt.Errorf("isobox: preparing docker read-deny masks: %w", errors.Join(err, cleanupErr))
+				}
+				return -1, err
+			}
+			if readDenyCleanup != nil {
+				priorCleanup := cleanup
+				cleanup = func() error {
+					return errors.Join(priorCleanup(), readDenyCleanup())
+				}
+			}
+		}
 	}
 
 	in, out, errw := streams.orDefaults()
@@ -154,7 +197,7 @@ func runPlanExec(ctx context.Context, backend Backend, binEnv string, plan *Plan
 		cmd.Env = s.Env
 	}
 
-	runErr := cmd.Run()
+	runErr := runResourceWatchedCommand(ctx, cmd, plan.resources)
 	cleanupErr := cleanup()
 	if runErr != nil {
 		var ee *exec.ExitError

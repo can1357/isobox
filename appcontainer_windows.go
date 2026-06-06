@@ -20,9 +20,11 @@ import (
 )
 
 const (
-	procThreadAttributeSecurityCapabilities = 0x00020009
-	procThreadAttributeChildProcessPolicy   = 0x0002000e
-	processCreationChildProcessRestricted   = 0x00000001
+	procThreadAttributeSecurityCapabilities     = 0x00020009
+	procThreadAttributeChildProcessPolicy       = 0x0002000e
+	procThreadAttributeAllAppPackagesPolicy     = 0x0002000f
+	processCreationChildProcessRestricted       = 0x00000001
+	processCreationAllApplicationPackagesOptOut = 0x00000001
 
 	hresultAppContainerAlreadyExists = 0x800700b7
 
@@ -102,6 +104,18 @@ func runAppContainer(ctx context.Context, plan *Plan, s Spec, streams Stdio) (ex
 	}
 
 	var applied []aclGrant
+	for _, path := range profile.ReadDeny {
+		if _, err := os.Lstat(path); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return -1, fmt.Errorf("isobox: checking AppContainer read-deny path %s: %w", path, err)
+		}
+		grant := aclGrant{path: path, access: windows.GENERIC_READ | windows.GENERIC_EXECUTE, deny: true}
+		if err := applyACLGrantTree(appSID, grant, &applied); err != nil {
+			return -1, err
+		}
+	}
 	defer cleanupACLGrants(appSID, &applied)
 	traversalGranted := make(map[string]struct{})
 	for _, path := range profile.ReadGrants {
@@ -139,6 +153,9 @@ func runAppContainer(ctx context.Context, plan *Plan, s Spec, streams Stdio) (ex
 	defer stdio.closeAll()
 
 	attrCount := uint32(2) // security capabilities + handle list
+	if profile.LPAC {
+		attrCount++
+	}
 	if profile.ChildRestricted {
 		attrCount++
 	}
@@ -152,6 +169,12 @@ func runAppContainer(ctx context.Context, plan *Plan, s Spec, streams Stdio) (ex
 	}
 	if err := attrs.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST, unsafe.Pointer(&stdio.childHandles[0]), uintptr(len(stdio.childHandles))*unsafe.Sizeof(stdio.childHandles[0])); err != nil {
 		return -1, fmt.Errorf("isobox: setting AppContainer handle list: %w", err)
+	}
+	allAppPackagesPolicy := uint32(processCreationAllApplicationPackagesOptOut)
+	if profile.LPAC {
+		if err := attrs.Update(procThreadAttributeAllAppPackagesPolicy, unsafe.Pointer(&allAppPackagesPolicy), unsafe.Sizeof(allAppPackagesPolicy)); err != nil {
+			return -1, fmt.Errorf("isobox: setting AppContainer all-application-packages policy: %w", err)
+		}
 	}
 	childPolicy := uint32(processCreationChildProcessRestricted)
 	if profile.ChildRestricted {
@@ -389,13 +412,18 @@ type aclGrant struct {
 	access         windows.ACCESS_MASK
 	inheritance    uint32
 	hasInheritance bool
+	deny           bool
 }
 
 func applyACLGrant(sid *windows.SID, grant aclGrant) error {
-	if grant.hasInheritance {
-		return updatePathACLWithInheritance(sid, grant.path, grant.access, windows.GRANT_ACCESS, grant.inheritance)
+	mode := windows.ACCESS_MODE(windows.GRANT_ACCESS)
+	if grant.deny {
+		mode = windows.DENY_ACCESS
 	}
-	return updatePathACL(sid, grant.path, grant.access, windows.GRANT_ACCESS)
+	if grant.hasInheritance {
+		return updatePathACLWithInheritance(sid, grant.path, grant.access, mode, grant.inheritance)
+	}
+	return updatePathACL(sid, grant.path, grant.access, mode)
 }
 
 func revokeACLGrant(sid *windows.SID, grant aclGrant) error {

@@ -263,8 +263,12 @@ type Plan struct {
 	ac *acProfile
 	// gv carries an optional structured gVisor OCI plan for the gVisor executor.
 	gv *gvisorOCIPlan
+	// docker carries optional Docker runner metadata.
+	docker *dockerPlan
 	// fs carries an optional structured filesystem virtualization plan.
 	fs *fsVirtualizationPlan
+	// resources carries optional best-effort resource watchdog settings.
+	resources *resourceWatchdogPlan
 }
 
 // FilesystemVirtualization returns the planned filesystem virtualization

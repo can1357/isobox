@@ -9,43 +9,60 @@ import (
 	"strings"
 )
 
-func validateDockerReadOnlyImageVolumes(ctx context.Context, argv []string) error {
-	if !dockerArgvHas(argv, "--read-only") {
-		return nil
-	}
-	image, ok := dockerRunImage(argv)
+func lockDockerImageAndValidateVolumes(ctx context.Context, argv []string) ([]string, error) {
+	imageIndex, ok := dockerRunImageIndex(argv)
 	if !ok {
-		return nil
+		return argv, nil
 	}
-	volumes, err := inspectDockerImageVolumes(ctx, argv[0], image)
+	image := argv[imageIndex]
+	id, volumes, err := inspectDockerImageForRun(ctx, argv[0], image)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	violations := dockerReadOnlyVolumeViolations(argv, volumes)
-	if len(violations) == 0 {
-		return nil
+	if dockerArgvHas(argv, "--read-only") {
+		violations := dockerReadOnlyVolumeViolations(argv, volumes)
+		if len(violations) != 0 {
+			return nil, fmt.Errorf("isobox: docker image %q declares writable VOLUME %q, but this plan uses --read-only; use an image without that VOLUME or explicitly allow the path with Writable/AllowTemp", image, violations[0])
+		}
 	}
-	return fmt.Errorf("isobox: docker image %q declares writable VOLUME %q, but this plan uses --read-only; use an image without that VOLUME or explicitly allow the path with Writable/AllowTemp", image, violations[0])
+	rewritten := append([]string(nil), argv...)
+	rewritten[imageIndex] = id
+	return rewritten, nil
 }
 
-func inspectDockerImageVolumes(ctx context.Context, docker, image string) ([]string, error) {
-	out, err := exec.CommandContext(ctx, docker, "image", "inspect", image, "--format", "{{json .Config.Volumes}}").Output()
+type dockerImageInspect struct {
+	ID     string `json:"Id"`
+	Config struct {
+		Volumes map[string]json.RawMessage `json:"Volumes"`
+	} `json:"Config"`
+}
+
+func inspectDockerImageForRun(ctx context.Context, docker, image string) (string, []string, error) {
+	out, err := exec.CommandContext(ctx, docker, "image", "inspect", image).Output()
 	if err != nil {
-		return nil, fmt.Errorf("isobox: inspecting docker image volumes for %q: %w", image, err)
+		return "", nil, fmt.Errorf("isobox: inspecting docker image %q: %w", image, err)
 	}
-	text := strings.TrimSpace(string(out))
-	if text == "" || text == "null" {
-		return nil, nil
+	id, volumes, err := parseDockerImageInspect(out)
+	if err != nil {
+		return "", nil, fmt.Errorf("isobox: parsing docker image inspect for %q: %w", image, err)
 	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(text), &raw); err != nil {
-		return nil, fmt.Errorf("isobox: parsing docker image volumes for %q: %w", image, err)
+	return id, volumes, nil
+}
+
+func parseDockerImageInspect(data []byte) (string, []string, error) {
+	var images []dockerImageInspect
+	if err := json.Unmarshal(data, &images); err != nil {
+		return "", nil, err
 	}
+	if len(images) == 0 || images[0].ID == "" {
+		return "", nil, fmt.Errorf("missing image ID")
+	}
+	raw := images[0].Config.Volumes
 	volumes := make([]string, 0, len(raw))
 	for volume := range raw {
 		volumes = append(volumes, cleanDockerContainerPath(volume))
 	}
-	return volumes, nil
+	return images[0].ID, volumes, nil
 }
 
 func dockerReadOnlyVolumeViolations(argv []string, volumes []string) []string {
@@ -131,16 +148,24 @@ func dockerMountDestinationValue(value string) string {
 }
 
 func dockerRunImage(argv []string) (string, bool) {
-	if len(argv) < 3 || argv[1] != "run" {
+	idx, ok := dockerRunImageIndex(argv)
+	if !ok {
 		return "", false
+	}
+	return argv[idx], true
+}
+
+func dockerRunImageIndex(argv []string) (int, bool) {
+	if len(argv) < 3 || argv[1] != "run" {
+		return -1, false
 	}
 	for i := 2; i < len(argv); i++ {
 		arg := argv[i]
 		if arg == "--" {
 			if i+1 < len(argv) {
-				return argv[i+1], true
+				return i + 1, true
 			}
-			return "", false
+			return -1, false
 		}
 		if arg == "--rm" || arg == "--read-only" {
 			continue
@@ -155,9 +180,9 @@ func dockerRunImage(argv []string) (string, bool) {
 			}
 			continue
 		}
-		return arg, true
+		return i, true
 	}
-	return "", false
+	return -1, false
 }
 
 func dockerRunOptionTakesValue(option string) bool {

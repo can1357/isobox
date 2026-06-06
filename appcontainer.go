@@ -44,8 +44,10 @@ type acProfile struct {
 	Argv             []string
 	CapabilitySIDs   []acCapabilitySID
 	ReadGrants       []string
+	ReadDeny         []string
 	WriteGrants      []string
 	DeriveOnlyLowbox bool
+	LPAC             bool
 	ChildRestricted  bool
 	CPUs             float64
 	MemoryBytes      int64
@@ -64,8 +66,9 @@ func compileAppContainer(s Spec) (*Plan, error) {
 	if len(s.MachAllow) > 0 {
 		caveats = append(caveats, "Mach service allow-list is macOS Seatbelt-only; ignored on appcontainer")
 	}
-	if len(s.ReadDeny) > 0 {
-		caveats = append(caveats, "appcontainer cannot carve read-deny paths out of ACL grants; ignored")
+	readDeny := make([]string, 0, len(s.ReadDeny))
+	for _, path := range s.ReadDeny {
+		readDeny = appendGrant(readDeny, canonPath(path))
 	}
 	var capSIDs []acCapabilitySID
 
@@ -85,6 +88,13 @@ func compileAppContainer(s Spec) (*Plan, error) {
 		uses = uses.Union(NewCapabilitySet(CapNetOutbound))
 		caveats = append(caveats,
 			"appcontainer net.outbound is limited to InternetClient; private-network outbound is denied to keep server/listen blocked")
+	}
+
+	lpac := true
+	if len(capSIDs) == 0 {
+		uses = uses.Union(NewCapabilitySet(CapIPCRestrict))
+	} else {
+		caveats = append(caveats, "appcontainer runs as LPAC for IPC isolation, but network capability SIDs can reach host IPC endpoints that explicitly grant those capabilities; ipc.restrict is not claimed for this plan")
 	}
 
 	exe := s.Args[0]
@@ -136,6 +146,9 @@ func compileAppContainer(s Spec) (*Plan, error) {
 		caveats = append(caveats,
 			"appcontainer broad host reads are not provided without explicit readable ACL grants")
 	}
+	if len(readDeny) > 0 {
+		caveats = append(caveats, "appcontainer applies temporary DENY ACEs for ReadDeny paths where the DACL is writable; this is path ACL mutation, not broad read-deny capability")
+	}
 
 	writeGrants := []string(nil)
 	deriveOnlyLowbox := false
@@ -146,12 +159,8 @@ func compileAppContainer(s Spec) (*Plan, error) {
 	}
 	switch s.Write {
 	case WriteNone:
-		if !s.AllowTemp {
-			deriveOnlyLowbox = true
-			uses = uses.Union(NewCapabilitySet(CapFSWriteDeny))
-		} else {
-			appendTempGrants()
-		}
+		deriveOnlyLowbox = true
+		uses = uses.Union(NewCapabilitySet(CapFSWriteDeny))
 		caveats = append(caveats, appContainerWriteDenyCaveat)
 	case WriteScope:
 		deriveOnlyLowbox = true
@@ -165,6 +174,7 @@ func compileAppContainer(s Spec) (*Plan, error) {
 		uses = uses.Union(NewCapabilitySet(CapFSWriteScope))
 		caveats = append(caveats,
 			"appcontainer scoped writes temporarily grant ACL access to the AppContainer SID; unclean exits can leave the grant behind")
+		caveats = append(caveats, "appcontainer scoped write grants are path ACL based; hardlinks inside writable paths can modify the same file object through out-of-scope aliases")
 		caveats = append(caveats, appContainerAmbientWriteCaveat)
 	case WriteEphemeral:
 		deriveOnlyLowbox = true
@@ -189,6 +199,7 @@ func compileAppContainer(s Spec) (*Plan, error) {
 			"appcontainer has no ephemeral/shadow overlay; writes outside writable paths are denied")
 		caveats = append(caveats,
 			"appcontainer scoped writes temporarily grant ACL access to the AppContainer SID; unclean exits can leave the grant behind")
+		caveats = append(caveats, "appcontainer scoped write grants are path ACL based; hardlinks inside writable paths can modify the same file object through out-of-scope aliases")
 		caveats = append(caveats, appContainerAmbientWriteCaveat)
 	}
 
@@ -220,8 +231,10 @@ func compileAppContainer(s Spec) (*Plan, error) {
 		Argv:             argv,
 		CapabilitySIDs:   append([]acCapabilitySID(nil), capSIDs...),
 		ReadGrants:       append([]string(nil), readGrants...),
+		ReadDeny:         append([]string(nil), readDeny...),
 		WriteGrants:      append([]string(nil), writeGrants...),
 		DeriveOnlyLowbox: deriveOnlyLowbox,
+		LPAC:             lpac,
 		ChildRestricted:  childRestricted,
 		CPUs:             s.CPUs,
 		MemoryBytes:      s.MemoryBytes,
@@ -328,11 +341,23 @@ func renderAppContainerProfile(p *acProfile) string {
 	if p.DeriveOnlyLowbox {
 		b.WriteString("  profile storage: derive-only\n")
 	}
+	if p.LPAC {
+		b.WriteString("  all application packages: opt-out\n")
+	}
 	b.WriteString("  read grants:")
 	if len(p.ReadGrants) == 0 {
 		b.WriteString(" none")
 	} else {
 		for _, path := range p.ReadGrants {
+			fmt.Fprintf(&b, " %s", path)
+		}
+	}
+	b.WriteByte('\n')
+	b.WriteString("  read deny:")
+	if len(p.ReadDeny) == 0 {
+		b.WriteString(" none")
+	} else {
+		for _, path := range p.ReadDeny {
 			fmt.Fprintf(&b, " %s", path)
 		}
 	}

@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// Union/Intersection must satisfy the set relationships against every backend,
-// regardless of which capabilities the tables happen to contain today.
+// Union/Intersection must satisfy the set relationships against known backends
+// and per-OS compatibility unions.
 func TestUnionIntersectionInvariants(t *testing.T) {
 	union, inter := Union(), Intersection()
 	for _, b := range Backends() {
@@ -16,23 +16,32 @@ func TestUnionIntersectionInvariants(t *testing.T) {
 				t.Errorf("Union missing %s supported by %s", c, b)
 			}
 		}
-		for _, c := range inter.List() {
-			if !caps.Has(c) {
-				t.Errorf("Intersection has %s but %s does not support it", c, b)
-			}
-		}
 	}
-	// A capability is in the intersection iff every backend supports it.
-	for _, c := range union.List() {
-		all := true
-		for _, b := range Backends() {
-			if !CapsOf(b).Has(c) {
-				all = false
-				break
+	for _, goos := range []string{"darwin", "linux", "windows"} {
+		osUnion := NewCapabilitySet()
+		for _, b := range backendCandidatesForGOOS(goos) {
+			osUnion = osUnion.Union(CapsOf(b))
+		}
+		for _, c := range inter.List() {
+			if !osUnion.Has(c) {
+				t.Errorf("Intersection has %s but %s-compatible backends do not support it", c, goos)
 			}
 		}
-		if all != inter.Has(c) {
-			t.Errorf("intersection membership wrong for %s: inAll=%v inter=%v", c, all, inter.Has(c))
+		for _, c := range union.List() {
+			inEveryOS := true
+			for _, otherGOOS := range []string{"darwin", "linux", "windows"} {
+				otherUnion := NewCapabilitySet()
+				for _, b := range backendCandidatesForGOOS(otherGOOS) {
+					otherUnion = otherUnion.Union(CapsOf(b))
+				}
+				if !otherUnion.Has(c) {
+					inEveryOS = false
+					break
+				}
+			}
+			if inEveryOS != inter.Has(c) {
+				t.Errorf("intersection membership wrong for %s: inEveryOS=%v inter=%v", c, inEveryOS, inter.Has(c))
+			}
 		}
 	}
 }
@@ -48,12 +57,15 @@ func TestCapabilityContracts(t *testing.T) {
 		CapFSWriteDeny,
 		CapFSWriteScope,
 		CapFSWriteEphemeral,
+		CapIPCRestrict,
+		CapResCPU,
+		CapResMemory,
 	} {
 		if !inter.Has(c) {
-			t.Errorf("expected %s to be portable (in intersection)", c)
+			t.Errorf("expected %s to be portable (in per-OS compatibility intersection)", c)
 		}
 	}
-	for _, c := range []Capability{CapFSReadHost, CapFSReadDeny, CapProcNoExec, CapKernelIsolation, CapIPCRestrict, CapMachRestrict, CapResCPU, CapResMemory} {
+	for _, c := range []Capability{CapFSReadHost, CapFSReadDeny, CapProcNoExec, CapKernelIsolation, CapMachRestrict} {
 		if inter.Has(c) {
 			t.Errorf("%s must not be portable", c)
 		}
@@ -77,7 +89,7 @@ func TestCapabilityContracts(t *testing.T) {
 			t.Errorf("gVisor must advertise %s", c)
 		}
 	}
-	for _, c := range []Capability{CapNetOutbound, CapFSReadScope, CapFSWriteDeny, CapFSWriteScope, CapFSWriteEphemeral, CapProcNoExec} {
+	for _, c := range []Capability{CapNetOutbound, CapFSReadScope, CapFSWriteDeny, CapFSWriteScope, CapFSWriteEphemeral, CapProcNoExec, CapIPCRestrict} {
 		if !CapsOf(BackendAppContainer).Has(c) {
 			t.Errorf("AppContainer must advertise %s", c)
 		}
@@ -87,12 +99,17 @@ func TestCapabilityContracts(t *testing.T) {
 			t.Errorf("Docker ephemeral must advertise %s", c)
 		}
 	}
+	for _, c := range []Capability{CapNetOutbound, CapFSReadScope, CapFSWriteDeny, CapFSWriteScope, CapFSWriteEphemeral, CapIPCRestrict, CapKernelIsolation} {
+		if !CapsOf(BackendDockerRunscEphemeral).Has(c) {
+			t.Errorf("Docker runsc ephemeral must advertise %s", c)
+		}
+	}
 	for _, c := range []Capability{CapProcNoExec, CapIPCRestrict} {
 		if CapsOf(BackendSeatbelt).Has(c) {
 			t.Errorf("Seatbelt must not advertise %s", c)
 		}
 	}
-	for _, c := range []Capability{CapFSReadHost, CapFSReadDeny, CapKernelIsolation, CapIPCRestrict} {
+	for _, c := range []Capability{CapFSReadHost, CapFSReadDeny, CapKernelIsolation} {
 		if CapsOf(BackendAppContainer).Has(c) {
 			t.Errorf("AppContainer must not advertise %s", c)
 		}
@@ -117,11 +134,11 @@ func TestIPCRestrictCapabilityContracts(t *testing.T) {
 	if !CapsOf(BackendDockerEphemeral).Has(CapIPCRestrict) {
 		t.Fatal("docker-ephemeral must claim ipc.restrict by private IPC and mount namespaces")
 	}
+	if !CapsOf(BackendAppContainer).Has(CapIPCRestrict) {
+		t.Fatal("AppContainer must claim ipc.restrict by LPAC/AAP opt-out")
+	}
 	if CapsOf(BackendGvisor).Has(CapMachRestrict) {
 		t.Fatal("mach.restrict must stay Seatbelt-only")
-	}
-	if CapsOf(BackendAppContainer).Has(CapIPCRestrict) {
-		t.Fatal("AppContainer must not advertise ipc.restrict until its plan surfaces the invariant")
 	}
 }
 
@@ -229,11 +246,11 @@ func TestNetDisableDescriptionAdmitsLoopbackVariance(t *testing.T) {
 	}
 }
 
-// Resource-limit capabilities are supported by every backend that has a real
-// enforcement mechanism, but not by Seatbelt, so they stay out of the portable
-// intersection.
+// Resource-limit capabilities are supported on every host OS when optional
+// compatibility backends are included: native Windows, native/gVisor Linux, and
+// Docker/runsc on macOS.
 func TestResourceLimitCapabilityContracts(t *testing.T) {
-	for _, b := range []Backend{BackendGvisor, BackendAppContainer, BackendDockerEphemeral} {
+	for _, b := range []Backend{BackendGvisor, BackendAppContainer, BackendDockerEphemeral, BackendDockerRunscEphemeral} {
 		caps := CapsOf(b)
 		if !caps.Has(CapResCPU) || !caps.Has(CapResMemory) {
 			t.Errorf("%s must advertise res.cpu and res.memory: %v", b, caps.List())
@@ -242,8 +259,8 @@ func TestResourceLimitCapabilityContracts(t *testing.T) {
 	if CapsOf(BackendSeatbelt).Has(CapResCPU) || CapsOf(BackendSeatbelt).Has(CapResMemory) {
 		t.Error("Seatbelt must not advertise resource limits; SBPL has no CPU/memory mechanism")
 	}
-	if inter := Intersection(); inter.Has(CapResCPU) || inter.Has(CapResMemory) {
-		t.Error("resource limits must not be portable while Seatbelt cannot enforce them")
+	if inter := Intersection(); !inter.Has(CapResCPU) || !inter.Has(CapResMemory) {
+		t.Error("resource limits must be portable across OS-compatible backend unions")
 	}
 	if union := Union(); !union.Has(CapResCPU) || !union.Has(CapResMemory) {
 		t.Error("resource limits must appear in the union of all backends")
