@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -74,17 +73,6 @@ func prepareMacOSAPFSWorkspaceClone(fs *fsVirtualizationPlan, plan *Plan, s Spec
 		Dir:     cloneRoot,
 		Cleanup: func() error { return os.RemoveAll(tmp) },
 	}, nil
-}
-
-func replacePlanPlaceholder(plan *Plan, placeholder, value string) {
-	if plan.Profile != "" {
-		plan.Profile = strings.ReplaceAll(plan.Profile, placeholder, value)
-	}
-	for i, arg := range plan.Argv {
-		if strings.Contains(arg, placeholder) {
-			plan.Argv[i] = strings.ReplaceAll(arg, placeholder, value)
-		}
-	}
 }
 
 func cloneWorkspaceTree(src, dst string) error {

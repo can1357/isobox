@@ -99,8 +99,8 @@ func TestAppContainerNetworkCapabilities(t *testing.T) {
 				}
 			}
 			if tc.net == NetOutbound {
-				if p.Uses.Has(CapNetOutbound) {
-					t.Fatalf("outbound AppContainer plan should not claim %s: %v", CapNetOutbound, p.Uses.List())
+				if !p.Uses.Has(CapNetOutbound) {
+					t.Fatalf("outbound AppContainer plan should claim %s: %v", CapNetOutbound, p.Uses.List())
 				}
 				if !caveatContains(p.Caveats, "InternetClient") {
 					t.Fatalf("outbound must explain InternetClient limitation: %v", p.Caveats)
@@ -202,6 +202,15 @@ func TestAppContainerWriteModes(t *testing.T) {
 	if !hasString(scoped.ac.WriteGrants, canonPath(writable)) {
 		t.Fatalf("missing writable grant %s in %v", canonPath(writable), scoped.ac.WriteGrants)
 	}
+	if !scoped.ac.DeriveOnlyLowbox {
+		t.Fatalf("WriteScope must avoid per-profile storage: %+v", scoped.ac)
+	}
+	if !profileHas(scoped.Profile, "profile storage: derive-only") {
+		t.Fatalf("WriteScope profile must show derive-only storage:\n%s", scoped.Profile)
+	}
+	if !caveatContains(scoped.Caveats, "ambient write access") {
+		t.Fatalf("WriteScope must caveat ambient writable ACLs: %v", scoped.Caveats)
+	}
 
 	none, err := compileAppContainer(Spec{
 		Args:     []string{exe},
@@ -212,16 +221,20 @@ func TestAppContainerWriteModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// R1: AppContainer cannot deny all writes (per-profile storage + TEMP remain
-	// writable), so it must not claim fs.write.deny and must caveat the gap.
-	if none.Uses.Has(CapFSWriteDeny) {
-		t.Fatalf("WriteNone on AppContainer must not claim fs.write.deny: %v", none.Uses.List())
+	if !none.Uses.Has(CapFSWriteDeny) {
+		t.Fatalf("WriteNone on AppContainer must claim fs.write.deny: %v", none.Uses.List())
 	}
-	if !caveatContains(none.Caveats, "cannot deny all writes") {
-		t.Fatalf("WriteNone must carry per-profile storage caveat: %v", none.Caveats)
+	if !none.ac.DeriveOnlyLowbox {
+		t.Fatalf("WriteNone must use derive-only profile storage: %+v", none.ac)
 	}
-	if !caveatContains(none.Caveats, "%LOCALAPPDATA%") {
-		t.Fatalf("WriteNone caveat must name the host-backed storage location: %v", none.Caveats)
+	if len(none.ac.WriteGrants) != 0 {
+		t.Fatalf("WriteNone must not grant writable host paths: %+v", none.ac)
+	}
+	if !profileHas(none.Profile, "profile storage: derive-only") {
+		t.Fatalf("WriteNone profile must show derive-only storage:\n%s", none.Profile)
+	}
+	if !caveatContains(none.Caveats, "ALL APPLICATION PACKAGES") {
+		t.Fatalf("WriteNone must caveat ambient ALL APPLICATION PACKAGES writes: %v", none.Caveats)
 	}
 
 	ephemeral, err := compileAppContainer(Spec{
@@ -233,15 +246,26 @@ func TestAppContainerWriteModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// R1: ephemeral degrades to "deny", but AppContainer cannot fully deny.
-	if ephemeral.Uses.Has(CapFSWriteDeny) || ephemeral.Uses.Has(CapFSWriteEphemeral) {
-		t.Fatalf("ephemeral degrade capabilities wrong: %v", ephemeral.Uses.List())
+	if !ephemeral.Uses.Has(CapFSWriteEphemeral) || ephemeral.Uses.Has(CapFSWriteDeny) {
+		t.Fatalf("ephemeral capabilities wrong: %v", ephemeral.Uses.List())
 	}
-	if !caveatContains(ephemeral.Caveats, "no ephemeral overlay") {
-		t.Fatalf("missing ephemeral degrade caveat: %v", ephemeral.Caveats)
+	if !ephemeral.ac.DeriveOnlyLowbox {
+		t.Fatalf("WriteEphemeral must avoid per-profile storage: %+v", ephemeral.ac)
 	}
-	if !caveatContains(ephemeral.Caveats, "cannot deny all writes") {
-		t.Fatalf("ephemeral must also carry per-profile storage caveat: %v", ephemeral.Caveats)
+	if ephemeral.ac.WorkDir != isoboxEphemeralRootPlaceholder {
+		t.Fatalf("ephemeral workdir=%q, want placeholder", ephemeral.ac.WorkDir)
+	}
+	if !hasString(ephemeral.ac.ReadGrants, isoboxEphemeralRootPlaceholder) || !hasString(ephemeral.ac.WriteGrants, isoboxEphemeralRootPlaceholder) {
+		t.Fatalf("ephemeral grants must include clone placeholder: %+v", ephemeral.ac)
+	}
+	if ephemeral.fs == nil || ephemeral.fs.Kind != fsVirtualizationWindowsWorkspaceCopy {
+		t.Fatalf("ephemeral should request Windows workspace copy, got %#v", ephemeral.fs)
+	}
+	if !profileHas(ephemeral.Profile, isoboxEphemeralRootPlaceholder) {
+		t.Fatalf("ephemeral profile should contain clone placeholder:\n%s", ephemeral.Profile)
+	}
+	if !caveatContains(ephemeral.Caveats, "workspace-scoped") || !caveatContains(ephemeral.Caveats, "full byte copy") {
+		t.Fatalf("missing ephemeral workspace-copy caveats: %v", ephemeral.Caveats)
 	}
 
 	overlay, err := compileAppContainer(Spec{
@@ -262,11 +286,36 @@ func TestAppContainerWriteModes(t *testing.T) {
 	if !hasString(overlay.ac.WriteGrants, canonPath(writable)) {
 		t.Fatalf("missing overlay writable grant %s in %v", canonPath(writable), overlay.ac.WriteGrants)
 	}
+	if !overlay.ac.DeriveOnlyLowbox {
+		t.Fatalf("WriteOverlay must avoid per-profile storage: %+v", overlay.ac)
+	}
 	if !caveatContains(overlay.Caveats, "no ephemeral/shadow overlay") {
 		t.Fatalf("missing overlay degrade caveat: %v", overlay.Caveats)
 	}
 	if !caveatContains(overlay.Caveats, "cannot carve read-deny") {
 		t.Fatalf("missing read-deny caveat: %v", overlay.Caveats)
+	}
+	if !caveatContains(overlay.Caveats, "ambient write access") {
+		t.Fatalf("WriteOverlay must caveat ambient writable ACLs: %v", overlay.Caveats)
+	}
+}
+
+func TestAppContainerEphemeralPlaceholderReplacement(t *testing.T) {
+	exe := testExecutable(t)
+	p, err := compileAppContainer(Spec{Args: []string{exe}, Write: WriteEphemeral})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const clone = `C:\isobox\clone`
+	replacePlanPlaceholder(p, isoboxEphemeralRootPlaceholder, clone)
+	if p.ac.WorkDir != clone {
+		t.Fatalf("workdir placeholder not replaced: %+v", p.ac)
+	}
+	if !hasString(p.ac.ReadGrants, clone) || !hasString(p.ac.WriteGrants, clone) {
+		t.Fatalf("grant placeholders not replaced: %+v", p.ac)
+	}
+	if profileHas(p.Profile, isoboxEphemeralRootPlaceholder) || !profileHas(p.Profile, clone) {
+		t.Fatalf("profile placeholder replacement failed:\n%s", p.Profile)
 	}
 }
 

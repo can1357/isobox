@@ -40,40 +40,51 @@ func TestUnionIntersectionInvariants(t *testing.T) {
 // Design contracts that must not silently regress.
 func TestCapabilityContracts(t *testing.T) {
 	inter := Intersection()
-	for _, c := range []Capability{CapNetDisable, CapNetEnable} {
+	for _, c := range []Capability{
+		CapNetDisable,
+		CapNetEnable,
+		CapNetOutbound,
+		CapFSReadScope,
+		CapFSWriteDeny,
+		CapFSWriteScope,
+		CapFSWriteEphemeral,
+	} {
 		if !inter.Has(c) {
 			t.Errorf("expected %s to be portable (in intersection)", c)
+		}
+	}
+	for _, c := range []Capability{CapFSReadHost, CapFSReadDeny, CapProcNoExec, CapKernelIsolation, CapIPCRestrict, CapMachRestrict, CapResCPU, CapResMemory} {
+		if inter.Has(c) {
+			t.Errorf("%s must not be portable", c)
 		}
 	}
 	if !CapsOf(BackendGvisor).Has(CapKernelIsolation) {
 		t.Error("gVisor must advertise kernel.isolation")
 	}
-	if got := CapFSWriteEphemeral.Describe(); got != "permit writes but discard them; host untouched" {
-		t.Fatalf("fs.write.ephemeral description must not promise overlay-specific mechanics, got %q", got)
+	if got := CapFSWriteEphemeral.Describe(); got != "permit backend ephemeral writes; configured host inputs stay untouched" {
+		t.Fatalf("fs.write.ephemeral description must surface backend-scoped caveats, got %q", got)
 	}
 	if got := CapFSReadDeny.Describe(); got != "read broadly except denied sensitive paths" {
 		t.Fatalf("fs.read.deny description=%q", got)
 	}
-	if !CapsOf(BackendSeatbelt).Has(CapFSWriteEphemeral) {
-		t.Error("Seatbelt must advertise fs.write.ephemeral for caveated APFS clone virtualization")
-	}
-	if !CapsOf(BackendGvisor).Has(CapFSWriteEphemeral) {
-		t.Error("gVisor must advertise fs.write.ephemeral for overlay-backed virtualization")
-	}
-	if inter.Has(CapFSWriteEphemeral) {
-		t.Error("fs.write.ephemeral must not be treated as portable whole-host overlay parity")
-	}
-	for _, c := range []Capability{CapNetOutbound, CapFSReadScope, CapFSReadDeny, CapFSWriteScope} {
+	for _, c := range []Capability{CapNetOutbound, CapFSReadScope, CapFSReadDeny, CapFSWriteDeny, CapFSWriteScope, CapFSWriteEphemeral} {
 		if !CapsOf(BackendSeatbelt).Has(c) {
 			t.Errorf("Seatbelt must advertise %s", c)
 		}
 	}
-	if !CapsOf(BackendGvisor).Has(CapFSReadDeny) {
-		t.Error("gVisor must advertise fs.read.deny for read-deny obscuring mounts")
+	for _, c := range []Capability{CapFSReadHost, CapFSReadScope, CapFSReadDeny, CapFSWriteDeny, CapFSWriteScope, CapFSWriteEphemeral} {
+		if !CapsOf(BackendGvisor).Has(c) {
+			t.Errorf("gVisor must advertise %s", c)
+		}
 	}
-	for _, c := range []Capability{CapFSReadScope, CapFSWriteScope, CapProcNoExec} {
+	for _, c := range []Capability{CapNetOutbound, CapFSReadScope, CapFSWriteDeny, CapFSWriteScope, CapFSWriteEphemeral, CapProcNoExec} {
 		if !CapsOf(BackendAppContainer).Has(c) {
 			t.Errorf("AppContainer must advertise %s", c)
+		}
+	}
+	for _, c := range []Capability{CapNetOutbound, CapFSReadScope, CapFSWriteDeny, CapFSWriteScope, CapFSWriteEphemeral, CapIPCRestrict} {
+		if !CapsOf(BackendDockerEphemeral).Has(c) {
+			t.Errorf("Docker ephemeral must advertise %s", c)
 		}
 	}
 	for _, c := range []Capability{CapProcNoExec, CapIPCRestrict} {
@@ -81,22 +92,14 @@ func TestCapabilityContracts(t *testing.T) {
 			t.Errorf("Seatbelt must not advertise %s", c)
 		}
 	}
-	for _, c := range []Capability{CapNetOutbound, CapFSReadHost, CapFSReadDeny} {
+	for _, c := range []Capability{CapFSReadHost, CapFSReadDeny, CapKernelIsolation, CapIPCRestrict} {
 		if CapsOf(BackendAppContainer).Has(c) {
 			t.Errorf("AppContainer must not advertise %s", c)
 		}
 	}
-	for _, c := range []Capability{CapNetOutbound, CapFSReadScope, CapFSReadDeny, CapFSWriteScope, CapProcNoExec, CapKernelIsolation} {
+	for _, c := range []Capability{CapFSReadHost, CapFSReadDeny, CapProcNoExec, CapKernelIsolation} {
 		if CapsOf(BackendDockerEphemeral).Has(c) {
 			t.Errorf("Docker ephemeral must not advertise %s", c)
-		}
-		if c != CapNetOutbound && c != CapKernelIsolation && inter.Has(c) {
-			t.Errorf("%s must remain union-only, not portable", c)
-		}
-	}
-	for _, c := range []Capability{CapKernelIsolation, CapFSWriteEphemeral} {
-		if CapsOf(BackendAppContainer).Has(c) {
-			t.Errorf("AppContainer must not advertise %s", c)
 		}
 	}
 }
@@ -110,6 +113,9 @@ func TestIPCRestrictCapabilityContracts(t *testing.T) {
 	}
 	if !CapsOf(BackendGvisor).Has(CapIPCRestrict) {
 		t.Fatal("gVisor must claim ipc.restrict by construction")
+	}
+	if !CapsOf(BackendDockerEphemeral).Has(CapIPCRestrict) {
+		t.Fatal("docker-ephemeral must claim ipc.restrict by private IPC and mount namespaces")
 	}
 	if CapsOf(BackendGvisor).Has(CapMachRestrict) {
 		t.Fatal("mach.restrict must stay Seatbelt-only")

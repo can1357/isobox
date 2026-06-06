@@ -207,7 +207,8 @@ func gvisorOCIResources(p *gvisorOCIPlan) *ociResources {
 	}
 	if p.MemoryBytes > 0 {
 		limit := p.MemoryBytes
-		res.Memory = &ociMemory{Limit: &limit}
+		swap := p.MemoryBytes
+		res.Memory = &ociMemory{Limit: &limit, Swap: &swap}
 	}
 	return res
 }
@@ -230,6 +231,7 @@ type ociCPU struct {
 
 type ociMemory struct {
 	Limit *int64 `json:"limit,omitempty"`
+	Swap  *int64 `json:"swap,omitempty"`
 }
 
 type ociNamespace struct {

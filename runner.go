@@ -118,6 +118,28 @@ func runPlanExec(ctx context.Context, backend Backend, binEnv string, plan *Plan
 	if override := os.Getenv(binEnv); override != "" {
 		argv = append([]string{override}, argv[1:]...)
 	}
+	if backend == BackendDockerEphemeral {
+		if err := validateDockerReadOnlyImageVolumes(ctx, argv); err != nil {
+			if cleanupErr := cleanup(); cleanupErr != nil {
+				return -1, fmt.Errorf("isobox: preparing docker image volume policy: %w", errors.Join(err, cleanupErr))
+			}
+			return -1, err
+		}
+		var seccompCleanup func() error
+		argv, seccompCleanup, err = materializeDockerSeccompProfile(argv)
+		if err != nil {
+			if cleanupErr := cleanup(); cleanupErr != nil {
+				return -1, fmt.Errorf("isobox: preparing docker seccomp profile: %w", errors.Join(err, cleanupErr))
+			}
+			return -1, err
+		}
+		if seccompCleanup != nil {
+			priorCleanup := cleanup
+			cleanup = func() error {
+				return errors.Join(priorCleanup(), seccompCleanup())
+			}
+		}
+	}
 
 	in, out, errw := streams.orDefaults()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)

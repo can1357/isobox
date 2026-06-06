@@ -43,6 +43,9 @@ func TestGvisorNetworkPlans(t *testing.T) {
 	if !p.Uses.Has(CapNetOutbound) {
 		t.Fatal("NetOutbound plan should exercise net.outbound")
 	}
+	if !caveatsContain(p.Caveats, "UDP bind") {
+		t.Fatalf("NetOutbound caveat must mention UDP bind ambiguity: %v", p.Caveats)
+	}
 }
 
 func TestGvisorFlagsPrecedeDo(t *testing.T) {
@@ -217,8 +220,8 @@ func TestGvisorCaveats(t *testing.T) {
 		t.Errorf("Readable should carry ELF/library widening caveat, got %v", readable.Caveats)
 	}
 
-	if p, _ := compileGvisor(Spec{Args: []string{"x"}, Net: NetOutbound}); len(p.Caveats) != 0 {
-		t.Errorf("NetOutbound should be enforced without degradation caveat, got %v", p.Caveats)
+	if p, _ := compileGvisor(Spec{Args: []string{"x"}, Net: NetOutbound}); !caveatsContain(p.Caveats, "UDP bind") {
+		t.Errorf("NetOutbound should carry TCP-only/UDP caveat, got %v", p.Caveats)
 	}
 	if p, _ := compileGvisor(Spec{Args: []string{"x"}, NoExec: true}); len(p.Caveats) != 0 {
 		t.Errorf("NoExec alone should be enforced without degradation caveat, got %v", p.Caveats)
@@ -476,6 +479,9 @@ func TestGvisorResourceLimitsForceOCIAndConfig(t *testing.T) {
 	}
 	if res.Memory.Limit == nil || *res.Memory.Limit != 256<<20 {
 		t.Fatalf("memory limit=%v, want %d", res.Memory.Limit, 256<<20)
+	}
+	if res.Memory.Swap == nil || *res.Memory.Swap != 256<<20 {
+		t.Fatalf("memory swap=%v, want %d", res.Memory.Swap, 256<<20)
 	}
 }
 

@@ -39,7 +39,8 @@ const (
 	WriteNone WriteMode = iota
 	// WriteScope permits writes under Spec.Writable and optional temp roots.
 	WriteScope
-	// WriteEphemeral permits writes anywhere but discards them; host untouched.
+	// WriteEphemeral permits backend-provided ephemeral writes; backend scope and
+	// coverage are surfaced as caveats.
 	WriteEphemeral
 	// WriteOverlay persists writes under Spec.Writable and optional temp roots,
 	// while writes elsewhere are ephemeral when the backend can provide an
@@ -80,8 +81,9 @@ type Spec struct {
 	// Writable lists paths the sandbox may write when Write == WriteScope or
 	// Write == WriteOverlay.
 	Writable []string
-	// Readable, when non-empty, restricts reads to these paths (plus the
-	// minimum needed to load the executable). Empty grants broad host reads.
+	// Readable, when non-empty, restricts host/user filesystem reads to these
+	// paths plus backend-required runtime paths and ambient OS grants surfaced in
+	// plan caveats. Empty grants broad host reads where the backend supports it.
 	Readable []string
 	// ReadDeny lists sensitive paths to carve out of broad/scoped reads when a
 	// backend supports read deny rules.

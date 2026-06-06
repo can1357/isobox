@@ -4,9 +4,8 @@
 // directly inside an AppContainer.
 //
 // The backends do not enforce the same things. isobox models this explicitly as
-// a capability set per backend, so callers can target either the portable
-// Intersection (behaves identically everywhere) or opt into a backend's Union
-// extras and accept documented, queryable caveats.
+// Intersection (every backend has an enforcement strategy) or opt into a
+// backend's Union extras and accept documented, queryable caveats.
 package isobox
 
 import "sort"
@@ -21,8 +20,9 @@ const (
 	BackendGvisor Backend = "gvisor"
 	// BackendAppContainer is Windows AppContainer via in-process Win32 calls.
 	BackendAppContainer Backend = "appcontainer"
-	// BackendDockerEphemeral is Docker run --rm with no host mounts and a
-	// disposable, read-only container filesystem plus tmpfs scratch.
+	// BackendDockerEphemeral is Docker run --rm using the configured image,
+	// private IPC, no host mounts unless explicitly scoped, and disposable Docker
+	// storage/tmpfs for backend scratch.
 	BackendDockerEphemeral Backend = "docker-ephemeral"
 )
 
@@ -35,20 +35,25 @@ const (
 	CapNetDisable Capability = "net.disable"
 	// CapNetEnable permits network access.
 	CapNetEnable Capability = "net.enable"
-	// CapNetOutbound permits outbound connections but blocks listening/inbound.
+	// CapNetOutbound permits outbound connections and blocks TCP server setup.
+	// UDP bind and non-IP socket behavior are backend-specific caveats.
 	CapNetOutbound Capability = "net.outbound"
 	// CapFSReadHost grants broad read access to the host filesystem.
 	CapFSReadHost Capability = "fs.read.host"
-	// CapFSReadScope restricts reads to an explicit allowlist.
+	// CapFSReadScope restricts host/user filesystem reads to an explicit
+	// allowlist plus backend-required runtime paths and ambient OS grants surfaced
+	// as caveats.
 	CapFSReadScope Capability = "fs.read.scope"
 	// CapFSReadDeny grants broad reads while denying listed sensitive paths.
 	CapFSReadDeny Capability = "fs.read.deny"
 	// CapFSWriteDeny denies all writes to the host filesystem.
 	CapFSWriteDeny Capability = "fs.write.deny"
-	// CapFSWriteScope permits writes only to listed paths, persisting to the host.
+	// CapFSWriteScope permits writes under listed paths, plus opt-in temp roots;
+	// listed-path writes persist to the host.
 	CapFSWriteScope Capability = "fs.write.scope"
-	// CapFSWriteEphemeral permits writes while arranging for them to be
-	// discarded; the host filesystem is never modified.
+	// CapFSWriteEphemeral permits backend-provided ephemeral writes; configured
+	// host inputs are not modified, and backend scope/coverage is surfaced in
+	// caveats.
 	CapFSWriteEphemeral Capability = "fs.write.ephemeral"
 	// CapProcNoExec forbids creating a new program image after launch.
 	CapProcNoExec Capability = "proc.no_exec"
@@ -69,13 +74,13 @@ const (
 var capDescriptions = map[Capability]string{
 	CapNetDisable:       "deny network access; some backends additionally block loopback (see caveats)",
 	CapNetEnable:        "permit network access",
-	CapNetOutbound:      "permit outbound connections, block inbound/listen",
+	CapNetOutbound:      "permit outbound connections; block inbound TCP listeners",
 	CapFSReadHost:       "read the host filesystem broadly",
-	CapFSReadScope:      "restrict reads to an allowlist",
+	CapFSReadScope:      "restrict host/user filesystem reads to an allowlist plus backend runtime paths",
 	CapFSReadDeny:       "read broadly except denied sensitive paths",
 	CapFSWriteDeny:      "deny all writes to the host filesystem",
-	CapFSWriteScope:     "permit writes only to listed paths, persisted to host",
-	CapFSWriteEphemeral: "permit writes but discard them; host untouched",
+	CapFSWriteScope:     "permit writes under listed paths plus opt-in temp roots; listed-path writes persist",
+	CapFSWriteEphemeral: "permit backend ephemeral writes; configured host inputs stay untouched",
 	CapProcNoExec:       "forbid executing another program image",
 	CapKernelIsolation:  "serve syscalls from a user-space kernel; shield host kernel",
 	CapIPCRestrict:      "no host local IPC endpoint reachable",
@@ -106,14 +111,20 @@ var backendCaps = map[Backend]CapabilitySet{
 		CapResCPU, CapResMemory,
 	),
 	BackendAppContainer: NewCapabilitySet(
-		CapNetDisable, CapNetEnable,
+		CapNetDisable, CapNetEnable, CapNetOutbound,
 		CapFSReadScope,
+		CapFSWriteDeny,
+		CapFSWriteEphemeral,
 		CapFSWriteScope,
 		CapProcNoExec,
 		CapResCPU, CapResMemory,
 	),
 	BackendDockerEphemeral: NewCapabilitySet(
-		CapNetDisable, CapNetEnable,
+		CapNetDisable, CapNetEnable, CapNetOutbound,
+		CapFSWriteDeny,
+		CapFSWriteEphemeral,
+		CapFSReadScope, CapFSWriteScope,
+		CapIPCRestrict,
 		CapResCPU, CapResMemory,
 	),
 }

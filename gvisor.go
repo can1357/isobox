@@ -52,6 +52,8 @@ func compileGvisor(s Spec) (*Plan, error) {
 		uses = uses.Union(NewCapabilitySet(CapNetEnable))
 	case NetOutbound:
 		uses = uses.Union(NewCapabilitySet(CapNetOutbound))
+		caveats = append(caveats,
+			"gvisor net.outbound denies TCP listen/accept/accept4; UDP bind may still be creatable, and the syscall-wide deny also blocks AF_UNIX stream servers")
 	}
 
 	if len(s.Readable) > 0 {
@@ -103,12 +105,12 @@ func compileGvisor(s Spec) (*Plan, error) {
 	if s.CPUs > 0 {
 		uses = uses.Union(NewCapabilitySet(CapResCPU))
 		caveats = append(caveats,
-			"gvisor CPU limit is applied to the sandbox's host cgroup via runsc; enforcement requires cgroup support on the host")
+			"gvisor CPU limit is applied to the sandbox's host cgroup via runsc; enforcement requires cgroup support on the host, and requests at least the host logical CPU count impose no effective limit")
 	}
 	if s.MemoryBytes > 0 {
 		uses = uses.Union(NewCapabilitySet(CapResMemory))
 		caveats = append(caveats,
-			"gvisor memory limit is charged to the sandbox's host cgroup via runsc; enforcement requires cgroup support on the host")
+			"gvisor memory and swap limits are charged to the sandbox's host cgroup via runsc; enforcement requires cgroup support on the host")
 	}
 	if os.Getenv("ISOBOX_RUNSC") != "" {
 		caveats = append(caveats, "kernel.isolation assumes ISOBOX_RUNSC points at a genuine gVisor runsc; a non-gVisor runtime would run on the host kernel without userspace-kernel isolation")

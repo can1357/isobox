@@ -16,6 +16,7 @@ const (
 	fsVirtualizationMacOSAPFSClone       fsVirtualizationKind = "macos-apfs-workspace-clone"
 	fsVirtualizationLinuxNamespaceView   fsVirtualizationKind = "linux-namespace-view"
 	fsVirtualizationLinuxPreloadFallback fsVirtualizationKind = "linux-preload-fallback"
+	fsVirtualizationWindowsWorkspaceCopy fsVirtualizationKind = "windows-workspace-copy"
 )
 
 // fsVirtualizationPlan is inspectable compiler output. It must not hold temp
@@ -52,6 +53,8 @@ func prepareFSVirtualization(plan *Plan, s Spec) (*fsVirtualizationRuntime, erro
 		return prepareLinuxNamespaceView(fs, plan, s)
 	case fsVirtualizationLinuxPreloadFallback:
 		return prepareLinuxPreloadFallback(fs, plan, s)
+	case fsVirtualizationWindowsWorkspaceCopy:
+		return prepareWindowsWorkspaceCopy(fs, plan, s)
 	default:
 		return nil, fmt.Errorf("isobox: unknown filesystem virtualization kind %q", fs.Kind)
 	}
@@ -66,6 +69,35 @@ func appendPlanFSCaveats(plan *Plan, runtime *fsVirtualizationRuntime) {
 	}
 	if runtime != nil && len(runtime.Caveats) > 0 {
 		plan.Caveats = append(plan.Caveats, runtime.Caveats...)
+	}
+}
+
+func replacePlanPlaceholder(plan *Plan, placeholder, value string) {
+	if plan == nil {
+		return
+	}
+	if plan.Profile != "" {
+		plan.Profile = strings.ReplaceAll(plan.Profile, placeholder, value)
+	}
+	for i, arg := range plan.Argv {
+		if strings.Contains(arg, placeholder) {
+			plan.Argv[i] = strings.ReplaceAll(arg, placeholder, value)
+		}
+	}
+	if plan.ac != nil {
+		plan.ac.Exe = strings.ReplaceAll(plan.ac.Exe, placeholder, value)
+		plan.ac.WorkDir = strings.ReplaceAll(plan.ac.WorkDir, placeholder, value)
+		replaceStringSlicePlaceholder(plan.ac.Argv, placeholder, value)
+		replaceStringSlicePlaceholder(plan.ac.ReadGrants, placeholder, value)
+		replaceStringSlicePlaceholder(plan.ac.WriteGrants, placeholder, value)
+	}
+}
+
+func replaceStringSlicePlaceholder(items []string, placeholder, value string) {
+	for i, item := range items {
+		if strings.Contains(item, placeholder) {
+			items[i] = strings.ReplaceAll(item, placeholder, value)
+		}
 	}
 }
 

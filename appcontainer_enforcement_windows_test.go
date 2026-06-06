@@ -112,6 +112,35 @@ func TestAppContainerEnforcement(t *testing.T) {
 		t.Fatalf("denied file should not exist, stat err=%v", err)
 	}
 
+	writeNoneTemp := filepath.Join(t.TempDir(), "write-none-temp.txt")
+	if code, out, plan := run(Spec{Args: []string{cmd, "/C", "echo no>" + cmdQuote(writeNoneTemp)}, Net: NetEnable, Write: WriteNone}); code == 0 {
+		t.Fatalf("WriteNone temp write unexpectedly succeeded\noutput:\n%s\nplan:\n%s", out, plan.Profile)
+	}
+	if _, err := os.Stat(writeNoneTemp); !os.IsNotExist(err) {
+		t.Fatalf("WriteNone temp file should not exist, stat err=%v", err)
+	}
+
+	ephemeralWork := t.TempDir()
+	ephemeralExisting := filepath.Join(ephemeralWork, "existing.txt")
+	ephemeralNew := filepath.Join(ephemeralWork, "new.txt")
+	if err := os.WriteFile(ephemeralExisting, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, plan := run(Spec{
+		Args:  []string{cmd, "/C", "echo changed>existing.txt && echo clone>new.txt"},
+		Net:   NetEnable,
+		Dir:   ephemeralWork,
+		Write: WriteEphemeral,
+	}); code != 0 {
+		t.Fatalf("WriteEphemeral workspace command exit=%d, want 0\noutput:\n%s\nplan:\n%s", code, out, plan.Profile)
+	}
+	if b, err := os.ReadFile(ephemeralExisting); err != nil || string(b) != "original" {
+		t.Fatalf("WriteEphemeral changed host existing file: data=%q err=%v", b, err)
+	}
+	if _, err := os.Stat(ephemeralNew); !os.IsNotExist(err) {
+		t.Fatalf("WriteEphemeral new file leaked to host, stat err=%v", err)
+	}
+
 	if code, out, plan := run(Spec{Args: []string{cmd, "/C", "exit /B 0"}}); code != 0 {
 		t.Fatalf("no-net command exit=%d, want 0\noutput:\n%s\nplan:\n%s", code, out, plan.Profile)
 	}

@@ -1,6 +1,8 @@
 package isobox
 
 import (
+	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -23,7 +25,7 @@ func TestDockerArgvShapeNameAndDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		dockerBinary, "run", "--rm", "--name", stableSpecID("isobox", spec),
+		dockerBinary, "run", "--rm", "--name", stableSpecID("isobox", spec), "--ipc", "private",
 		"--read-only", "--tmpfs", "/tmp", "--tmpfs", "/run",
 		"alpine:3.20", "sh", "-c", "echo hi",
 	}
@@ -32,6 +34,9 @@ func TestDockerArgvShapeNameAndDefaults(t *testing.T) {
 	}
 	if argvHas(p.Argv, "--mount") || argvHas(p.Argv, "-v") || argvHas(p.Argv, "--volume") {
 		t.Fatalf("docker backend must not add host mounts by default: %v", p.Argv)
+	}
+	if !p.Uses.Has(CapIPCRestrict) {
+		t.Fatalf("docker default plan must surface ipc.restrict: %v", p.Uses.List())
 	}
 }
 
@@ -79,16 +84,17 @@ func TestDockerRunnerUsesDockerOverrideEnv(t *testing.T) {
 func TestDockerNetworkMappings(t *testing.T) {
 	t.Setenv(dockerImageEnv, "alpine")
 	cases := []struct {
-		name       string
-		net        NetMode
-		wantNone   bool
-		wantCap    Capability
-		wantCaveat string
-		forbidCap  Capability
+		name        string
+		net         NetMode
+		wantNone    bool
+		wantCap     Capability
+		wantSeccomp bool
+		wantCaveat  string
+		forbidCap   Capability
 	}{
 		{name: "disable", net: NetDisable, wantNone: true, wantCap: CapNetDisable},
 		{name: "enable", net: NetEnable, wantCap: CapNetEnable},
-		{name: "outbound", net: NetOutbound, wantCap: CapNetEnable, forbidCap: CapNetOutbound, wantCaveat: "net.outbound uses Docker's default bridge"},
+		{name: "outbound", net: NetOutbound, wantCap: CapNetOutbound, wantSeccomp: true, forbidCap: CapNetEnable, wantCaveat: "Docker seccomp profile"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -105,10 +111,92 @@ func TestDockerNetworkMappings(t *testing.T) {
 			if tc.forbidCap != "" && p.Uses.Has(tc.forbidCap) {
 				t.Fatalf("plan uses must not claim %s: %v", tc.forbidCap, p.Uses.List())
 			}
+			if gotSeccomp := hasArgPair(p.Argv, "--security-opt", dockerSeccompSecurityOpt()); gotSeccomp != tc.wantSeccomp {
+				t.Fatalf("--security-opt seccomp presence=%v, want %v in %v", gotSeccomp, tc.wantSeccomp, p.Argv)
+			}
 			if tc.wantCaveat != "" && !caveatsContain(p.Caveats, tc.wantCaveat) {
 				t.Fatalf("missing caveat %q in %v", tc.wantCaveat, p.Caveats)
 			}
+			if tc.net == NetOutbound && !caveatsContain(p.Caveats, "UDP bind") {
+				t.Fatalf("outbound caveat must mention UDP bind ambiguity: %v", p.Caveats)
+			}
 		})
+	}
+}
+
+func TestDockerOutboundSeccompMaterialization(t *testing.T) {
+	t.Setenv(dockerImageEnv, "alpine")
+	p, err := compileDockerEphemeral(Spec{Args: []string{"true"}, Net: NetOutbound})
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv, cleanup, err := materializeDockerSeccompProfile(p.Argv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil {
+		t.Fatal("expected seccomp cleanup for outbound docker plan")
+	}
+	defer cleanup()
+	if reflect.DeepEqual(argv, p.Argv) || hasArgPair(argv, "--security-opt", dockerSeccompSecurityOpt()) {
+		t.Fatalf("seccomp placeholder was not rewritten: %v", argv)
+	}
+	idx := argvIndex(argv, "--security-opt")
+	if idx < 0 || idx+1 >= len(argv) || !strings.HasPrefix(argv[idx+1], "seccomp=") {
+		t.Fatalf("missing materialized seccomp security-opt: %v", argv)
+	}
+	path := strings.TrimPrefix(argv[idx+1], "seccomp=")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var profile struct {
+		DefaultAction string `json:"defaultAction"`
+		Syscalls      []struct {
+			Names []string `json:"names"`
+		} `json:"syscalls"`
+	}
+	if err := json.Unmarshal(data, &profile); err != nil {
+		t.Fatalf("invalid seccomp json: %v", err)
+	}
+	if profile.DefaultAction != "SCMP_ACT_ERRNO" {
+		t.Fatalf("seccomp defaultAction=%q, want SCMP_ACT_ERRNO", profile.DefaultAction)
+	}
+	bindAllowed := false
+	for _, syscall := range profile.Syscalls {
+		for _, name := range syscall.Names {
+			if name == "bind" {
+				bindAllowed = true
+			}
+		}
+	}
+	if !bindAllowed {
+		t.Fatal("outbound seccomp profile intentionally keeps bind allowed for client sockets; update net.outbound wording/tests if this changes")
+	}
+	for _, syscall := range profile.Syscalls {
+		for _, name := range syscall.Names {
+			if name == "listen" || name == "accept" || name == "accept4" {
+				t.Fatalf("outbound seccomp profile still allows %s", name)
+			}
+		}
+	}
+}
+
+func TestDockerReadOnlyImageVolumePolicy(t *testing.T) {
+	argv := []string{
+		dockerBinary, "run", "--rm", "--read-only",
+		"--tmpfs", "/tmp",
+		"--mount", "type=bind,src=/host/out,dst=/host/out",
+		"--mount", "type=bind,src=/ro,dst=/ro,readonly",
+		"alpine", "true",
+	}
+	if image, ok := dockerRunImage(argv); !ok || image != "alpine" {
+		t.Fatalf("dockerRunImage=%q,%v", image, ok)
+	}
+	got := dockerReadOnlyVolumeViolations(argv, []string{"/data", "/tmp/cache", "/host/out/nested", "/ro/cache"})
+	want := []string{"/data", "/ro/cache"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("volume violations=%v, want %v", got, want)
 	}
 }
 
@@ -202,41 +290,63 @@ func TestDockerEphemeralRequiresImage(t *testing.T) {
 	}
 }
 
-func TestDockerReadOnlyTmpfsNoMountAndNoFSParityClaims(t *testing.T) {
+func TestDockerScopedFSMountsAndCapabilities(t *testing.T) {
 	t.Setenv(dockerImageEnv, "alpine")
 	p, err := compileDockerEphemeral(Spec{Args: []string{"true"}, Readable: []string{"/host"}, Write: WriteScope, Writable: []string{"/host/out"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"--read-only", "--tmpfs"} {
-		if !argvHas(p.Argv, want) {
-			t.Fatalf("argv missing %s: %v", want, p.Argv)
-		}
+	if !argvHas(p.Argv, "--read-only") {
+		t.Fatalf("scoped filesystem must keep container root read-only: %v", p.Argv)
 	}
-	if !hasArgPair(p.Argv, "--tmpfs", "/tmp") || !hasArgPair(p.Argv, "--tmpfs", "/run") {
-		t.Fatalf("argv missing tmpfs scratch: %v", p.Argv)
+	if argvHas(p.Argv, "--tmpfs") {
+		t.Fatalf("WriteScope must not add default tmpfs scratch without AllowTemp: %v", p.Argv)
 	}
-	if argvHas(p.Argv, "--mount") || argvHas(p.Argv, "-v") || argvHas(p.Argv, "--volume") {
-		t.Fatalf("docker backend must not add host mounts: %v", p.Argv)
+	if !hasArgPair(p.Argv, "--mount", "type=bind,src=/host,dst=/host,readonly") {
+		t.Fatalf("missing read-only readable bind mount: %v", p.Argv)
 	}
-	assertNoFSCapabilities(t, p.Uses)
-	assertNoFSCapabilities(t, CapsOf(BackendDockerEphemeral))
-	if p.Uses.Has(CapProcNoExec) {
-		t.Fatalf("docker backend claimed proc parity it does not provide: %v", p.Uses.List())
+	if !hasArgPair(p.Argv, "--mount", "type=bind,src=/host/out,dst=/host/out") {
+		t.Fatalf("missing writable bind mount: %v", p.Argv)
+	}
+	if !p.Uses.Has(CapFSReadScope) || !p.Uses.Has(CapFSWriteScope) {
+		t.Fatalf("docker scoped fs capabilities wrong: %v", p.Uses.List())
+	}
+	if p.Uses.Has(CapProcNoExec) || p.Uses.Has(CapFSReadDeny) || p.Uses.Has(CapFSReadHost) {
+		t.Fatalf("docker backend claimed unsupported parity: %v", p.Uses.List())
+	}
+	if p.Uses.Has(CapIPCRestrict) {
+		t.Fatalf("docker plan with host filesystem scopes must not claim ipc.restrict: %v", p.Uses.List())
+	}
+	if !caveatsContain(p.Caveats, "host IPC endpoints") {
+		t.Fatalf("missing host IPC caveat for scoped mounts: %v", p.Caveats)
+	}
+
+	temp, err := compileDockerEphemeral(Spec{Args: []string{"true"}, Write: WriteScope, Writable: []string{"/host/out"}, AllowTemp: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgPair(temp.Argv, "--tmpfs", "/tmp") || hasArgPair(temp.Argv, "--tmpfs", "/run") {
+		t.Fatalf("AllowTemp WriteScope should add only /tmp tmpfs: %v", temp.Argv)
 	}
 }
 
-func TestDockerWriteEphemeralCaveatsDegradation(t *testing.T) {
+func TestDockerWriteEphemeralUsesContainerLayer(t *testing.T) {
 	t.Setenv(dockerImageEnv, "alpine")
 	p, err := compileDockerEphemeral(Spec{Args: []string{"true"}, Write: WriteEphemeral})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !caveatsContain(p.Caveats, "does not provide writable whole-filesystem ephemeral writes") {
-		t.Fatalf("missing WriteEphemeral degradation caveat: %v", p.Caveats)
+	if argvHas(p.Argv, "--read-only") {
+		t.Fatalf("WriteEphemeral must leave the container layer writable: %v", p.Argv)
 	}
-	if p.Uses.Has(CapFSWriteEphemeral) {
-		t.Fatalf("docker backend must not claim fs.write.ephemeral degradation as enforced: %v", p.Uses.List())
+	if !hasArgPair(p.Argv, "--tmpfs", "/tmp") || !hasArgPair(p.Argv, "--tmpfs", "/run") {
+		t.Fatalf("WriteEphemeral should keep disposable tmpfs scratch: %v", p.Argv)
+	}
+	if !caveatsContain(p.Caveats, "disposable container writable layer") {
+		t.Fatalf("missing WriteEphemeral container-layer caveat: %v", p.Caveats)
+	}
+	if !p.Uses.Has(CapFSWriteEphemeral) {
+		t.Fatalf("docker backend must claim enforced fs.write.ephemeral: %v", p.Uses.List())
 	}
 }
 
@@ -251,20 +361,32 @@ func TestDockerWriteOverlayAndReadDenyCaveatsDegrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !caveatsContain(p.Caveats, "hybrid shadow writes") {
+	if !caveatsContain(p.Caveats, "no hybrid shadow layer") {
 		t.Fatalf("missing WriteOverlay degradation caveat: %v", p.Caveats)
 	}
 	if !caveatsContain(p.Caveats, "read-deny paths are not applied") {
 		t.Fatalf("missing read-deny caveat: %v", p.Caveats)
 	}
-	assertNoFSCapabilities(t, p.Uses)
+	if !hasArgPair(p.Argv, "--mount", "type=bind,src=/host/out,dst=/host/out") {
+		t.Fatalf("missing writable overlay bind mount: %v", p.Argv)
+	}
+	if !p.Uses.Has(CapFSWriteScope) || p.Uses.Has(CapFSWriteEphemeral) || p.Uses.Has(CapFSReadDeny) {
+		t.Fatalf("overlay capabilities wrong: %v", p.Uses.List())
+	}
 }
 
-func TestDockerRejectsHostWorkingDirectory(t *testing.T) {
+func TestDockerWorkingDirectoryMustBeMounted(t *testing.T) {
 	t.Setenv(dockerImageEnv, "alpine")
-	_, err := compileDockerEphemeral(Spec{Args: []string{"true"}, Dir: "/tmp"})
-	if err == nil || !strings.Contains(err.Error(), "working directory") {
+	if _, err := compileDockerEphemeral(Spec{Args: []string{"true"}, Dir: "/tmp"}); err == nil || !strings.Contains(err.Error(), "working directory") {
 		t.Fatalf("expected working directory error, got %v", err)
+	}
+
+	p, err := compileDockerEphemeral(Spec{Args: []string{"true"}, Dir: "/host/out", Readable: []string{"/host"}, Write: WriteScope, Writable: []string{"/host/out"}})
+	if err != nil {
+		t.Fatalf("mounted working directory should compile: %v", err)
+	}
+	if !hasArgPair(p.Argv, "--workdir", "/host/out") {
+		t.Fatalf("missing --workdir for mounted host dir: %v", p.Argv)
 	}
 }
 
@@ -275,15 +397,6 @@ func hasArgPair(argv []string, key, value string) bool {
 		}
 	}
 	return false
-}
-
-func assertNoFSCapabilities(t *testing.T, caps CapabilitySet) {
-	t.Helper()
-	for _, cap := range caps.List() {
-		if strings.HasPrefix(string(cap), "fs.") {
-			t.Fatalf("docker backend claimed fs capability %s in %v", cap, caps.List())
-		}
-	}
 }
 
 func caveatsContain(caveats []string, substr string) bool {
@@ -306,6 +419,9 @@ func TestDockerResourceLimitFlags(t *testing.T) {
 	}
 	if !hasArgPair(p.Argv, "--memory", "536870912") {
 		t.Fatalf("--memory bytes missing: %v", p.Argv)
+	}
+	if !hasArgPair(p.Argv, "--memory-swap", "536870912") {
+		t.Fatalf("--memory-swap bytes missing: %v", p.Argv)
 	}
 	if !p.Uses.Has(CapResCPU) || !p.Uses.Has(CapResMemory) {
 		t.Fatalf("plan uses missing resource caps: %v", p.Uses.List())

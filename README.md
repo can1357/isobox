@@ -112,23 +112,24 @@ A profile sets the defaults; explicit flags always override it.
 CAPABILITY          WINDOWS  DOCKER-EPHEMERAL  GVISOR  SEATBELT  PORTABLE  DESCRIPTION
 fs.read.deny        -        -                 yes     yes       -         read broadly except denied sensitive paths
 fs.read.host        -        -                 yes     yes       -         read the host filesystem broadly
-fs.read.scope       yes      -                 yes     yes       -         restrict reads to an allowlist
-fs.write.deny       -        -                 yes     yes       -         deny all writes to the host filesystem
-fs.write.ephemeral  -        -                 yes     yes       -         permit writes but discard them; host untouched
-fs.write.scope      yes      -                 yes     yes       -         permit writes only to listed paths, persisted to host
-ipc.restrict        -        -                 yes     -         -         no host local IPC endpoint reachable
+fs.read.scope       yes      yes               yes     yes       yes       restrict host/user filesystem reads to an allowlist plus backend runtime paths
+fs.write.deny       yes      yes               yes     yes       yes       deny all writes to the host filesystem
+fs.write.ephemeral  yes      yes               yes     yes       yes       permit backend ephemeral writes; configured host inputs stay untouched
+fs.write.scope      yes      yes               yes     yes       yes       permit writes under listed paths plus opt-in temp roots; listed-path writes persist
+ipc.restrict        -        yes               yes     -         -         no host local IPC endpoint reachable
 kernel.isolation    -        -                 yes     -         -         serve syscalls from a user-space kernel; shield host kernel
 mach.restrict       -        -                 -       yes       -         restrict Mach service lookups (Seatbelt-only)
 net.disable         yes      yes               yes     yes       yes       deny network access; some backends additionally block loopback (see caveats)
 net.enable          yes      yes               yes     yes       yes       permit network access
-net.outbound        -        -                 yes     yes       -         permit outbound connections, block inbound/listen
+net.outbound        yes      yes               yes     yes       yes       permit outbound connections; block inbound TCP listeners
 proc.no_exec        yes      -                 yes     -         -         forbid executing another program image
 res.cpu             yes      yes               yes     -         -         limit CPU usage to a fraction of the host's cores
 res.memory          yes      yes               yes     -         -         limit the sandbox's memory footprint
 ```
 
-`PORTABLE` marks the intersection: capabilities every backend enforces, so a spec
-built only from them runs identically everywhere.
+`PORTABLE` marks the intersection: every backend has an enforcement strategy for
+the capability. Always inspect plan caveats; backend runtime paths, temp roots,
+loopback behavior, and platform ambient grants can still differ.
 
 ## Inspecting a plan
 
@@ -230,13 +231,20 @@ isobox.NewBackend(b)                // a runner for a named backend, on any OS
   touching the host.
 - macOS `--write=ephemeral` clones the workspace with APFS `clonefile(2)`; it
   protects that workspace, not all of `/`.
+- Windows `--write=ephemeral` recursively copies the workspace to a temporary
+  AppContainer-writable directory and deletes it on exit; it is workspace-scoped
+  and a full byte copy.
 - `--cpus`/`--memory` cap resources on every backend that has a real mechanism:
   gVisor maps them onto the sandbox's host cgroup via the OCI bundle (`runsc` needs
-  cgroup support to enforce), `docker-ephemeral` passes `--cpus`/`--memory` to
-  `docker run`, and AppContainer assigns the process to a Windows job object
-  (whole-job memory cap plus a CPU hard cap scheduled as a share of all host cores).
+  cgroup support to enforce), `docker-ephemeral` passes `--cpus`, `--memory`, and
+  `--memory-swap` to `docker run`, and AppContainer assigns the process to a
+  Windows job object (whole-job memory cap plus a CPU hard cap scheduled as a
+  share of all host cores).
   Seatbelt has no resource-limit mechanism, so it reports a caveat and `--strict`
   rejects the limits as non-portable.
+- `--net=outbound` is TCP-server oriented. Docker and gVisor deny
+  `listen`/`accept`/`accept4`; UDP bind behavior is backend-specific and called
+  out in plan caveats.
 - On macOS, `docker-ephemeral` is an optional workaround for disposable Linux-image
   runs. Set `ISOBOX_DOCKER_IMAGE`; it isolates at the VM level unless Docker is
   configured with a `runsc` runtime.

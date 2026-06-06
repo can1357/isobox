@@ -57,23 +57,49 @@ var (
 	errAppContainerProfileAlreadyExists = errors.New("appcontainer profile already exists")
 )
 
-func runAppContainer(ctx context.Context, plan *Plan, s Spec, streams Stdio) (int, error) {
+func runAppContainer(ctx context.Context, plan *Plan, s Spec, streams Stdio) (exitCode int, retErr error) {
 	profile := plan.ac
 	if profile == nil {
 		return -1, fmt.Errorf("isobox: appcontainer plan missing structured profile")
 	}
+	fsRuntime, err := prepareFSVirtualization(plan, s)
+	if err != nil {
+		return -1, err
+	}
+	appendPlanFSCaveats(plan, fsRuntime)
+	cleanup := func() error { return nil }
+	if fsRuntime != nil && fsRuntime.Cleanup != nil {
+		cleanup = fsRuntime.Cleanup
+	}
+	defer func() {
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			wrapped := fmt.Errorf("isobox: cleaning filesystem virtualization: %w", cleanupErr)
+			if retErr != nil {
+				retErr = errors.Join(retErr, wrapped)
+				return
+			}
+			exitCode = -1
+			retErr = wrapped
+		}
+	}()
 
-	appSID, _, err := ensureAppContainerProfile(profile.ProfileName)
+	var appSID *windows.SID
+	if profile.DeriveOnlyLowbox {
+		appSID, err = deriveAppContainerSID(profile.ProfileName)
+	} else {
+		appSID, _, err = ensureAppContainerProfile(profile.ProfileName)
+	}
 	if err != nil {
 		return -1, err
 	}
 	defer windows.FreeSid(appSID)
-	// R6: per-run unique profile names mean the profile we just ensured is the
-	// one we own; always delete it on exit (success, error, signal) so a crashed
-	// or killed run cannot leak stale ACEs into a future isobox invocation that
-	// happened to derive the same SID. Best-effort: deleteAppContainerProfile
-	// is idempotent and swallows errors.
-	defer deleteAppContainerProfile(profile.ProfileName)
+	if !profile.DeriveOnlyLowbox {
+		// R6: per-run unique profile names mean the profile we just ensured is the
+		// one we own; always delete it on exit (success, error, signal) so a crashed
+		// or killed run cannot leak stale ACEs into a future run. Best-effort:
+		// deleteAppContainerProfile is idempotent and swallows errors.
+		defer deleteAppContainerProfile(profile.ProfileName)
+	}
 
 	var applied []aclGrant
 	defer cleanupACLGrants(appSID, &applied)
@@ -83,10 +109,9 @@ func runAppContainer(ctx context.Context, plan *Plan, s Spec, streams Stdio) (in
 			return -1, err
 		}
 		grant := aclGrant{path: path, access: windows.GENERIC_READ | windows.GENERIC_EXECUTE}
-		if err := applyACLGrant(appSID, grant); err != nil {
+		if err := applyACLGrantTree(appSID, grant, &applied); err != nil {
 			return -1, err
 		}
-		applied = append(applied, grant)
 	}
 	for _, path := range profile.WriteGrants {
 		if err := applyACLTraversalGrants(appSID, path, traversalGranted, &applied); err != nil {

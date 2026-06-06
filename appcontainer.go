@@ -38,16 +38,17 @@ func (s acCapabilitySID) String() string {
 // acProfile is the structured AppContainer plan consumed by the Windows
 // executor. It mirrors Plan.Profile, but without reparsing human-facing text.
 type acProfile struct {
-	ProfileName     string
-	Exe             string
-	WorkDir         string
-	Argv            []string
-	CapabilitySIDs  []acCapabilitySID
-	ReadGrants      []string
-	WriteGrants     []string
-	ChildRestricted bool
-	CPUs            float64
-	MemoryBytes     int64
+	ProfileName      string
+	Exe              string
+	WorkDir          string
+	Argv             []string
+	CapabilitySIDs   []acCapabilitySID
+	ReadGrants       []string
+	WriteGrants      []string
+	DeriveOnlyLowbox bool
+	ChildRestricted  bool
+	CPUs             float64
+	MemoryBytes      int64
 }
 
 // compileAppContainer turns a Spec into a Windows AppContainer plan. It is pure:
@@ -81,6 +82,7 @@ func compileAppContainer(s Spec) (*Plan, error) {
 		uses = uses.Union(NewCapabilitySet(CapNetEnable))
 	case NetOutbound:
 		capSIDs = append(capSIDs, acWinCapabilityInternetClientSid)
+		uses = uses.Union(NewCapabilitySet(CapNetOutbound))
 		caveats = append(caveats,
 			"appcontainer net.outbound is limited to InternetClient; private-network outbound is denied to keep server/listen blocked")
 	}
@@ -111,11 +113,17 @@ func compileAppContainer(s Spec) (*Plan, error) {
 	if workDir != "" {
 		workDir = canonPath(workDir)
 	}
+	if s.Write == WriteEphemeral {
+		workDir = isoboxEphemeralRootPlaceholder
+	}
 
 	readGrants := make([]string, 0, len(readableScopes)+2)
 	readGrants = appendGrant(readGrants, exe)
 	if workDir != "" && (len(readableScopes) == 0 || pathCoveredByAnyGrant(workDir, readableScopes) || pathCoveredByAnyGrant(workDir, writableScopes)) {
 		readGrants = appendGrant(readGrants, workDir)
+	}
+	if s.Write == WriteEphemeral {
+		readGrants = appendGrant(readGrants, isoboxEphemeralRootPlaceholder)
 	}
 	if len(readableScopes) > 0 {
 		for _, r := range readableScopes {
@@ -130,6 +138,7 @@ func compileAppContainer(s Spec) (*Plan, error) {
 	}
 
 	writeGrants := []string(nil)
+	deriveOnlyLowbox := false
 	appendTempGrants := func() {
 		for _, t := range osTempRoots() {
 			writeGrants = appendGrant(writeGrants, t)
@@ -137,11 +146,15 @@ func compileAppContainer(s Spec) (*Plan, error) {
 	}
 	switch s.Write {
 	case WriteNone:
-		if s.AllowTemp {
+		if !s.AllowTemp {
+			deriveOnlyLowbox = true
+			uses = uses.Union(NewCapabilitySet(CapFSWriteDeny))
+		} else {
 			appendTempGrants()
 		}
 		caveats = append(caveats, appContainerWriteDenyCaveat)
 	case WriteScope:
+		deriveOnlyLowbox = true
 		writeGrants = make([]string, 0, len(writableScopes)+2)
 		for _, w := range writableScopes {
 			writeGrants = appendGrant(writeGrants, w)
@@ -152,14 +165,18 @@ func compileAppContainer(s Spec) (*Plan, error) {
 		uses = uses.Union(NewCapabilitySet(CapFSWriteScope))
 		caveats = append(caveats,
 			"appcontainer scoped writes temporarily grant ACL access to the AppContainer SID; unclean exits can leave the grant behind")
+		caveats = append(caveats, appContainerAmbientWriteCaveat)
 	case WriteEphemeral:
-		if s.AllowTemp {
-			appendTempGrants()
-		}
+		deriveOnlyLowbox = true
+		writeGrants = appendGrant(writeGrants, isoboxEphemeralRootPlaceholder)
+		uses = uses.Union(NewCapabilitySet(CapFSWriteEphemeral))
 		caveats = append(caveats,
-			"appcontainer has no ephemeral overlay; writes are denied instead of discarded")
-		caveats = append(caveats, appContainerWriteDenyCaveat)
+			"appcontainer ephemeral writes are workspace-scoped to Spec.Dir/cwd via a recursive temp copy that is deleted on exit")
+		caveats = append(caveats,
+			"appcontainer workspace copy is a full byte copy on Windows, not a reflink/CoW clone")
+		caveats = append(caveats, appContainerAmbientWriteCaveat)
 	case WriteOverlay:
+		deriveOnlyLowbox = true
 		writeGrants = make([]string, 0, len(writableScopes)+2)
 		for _, w := range writableScopes {
 			writeGrants = appendGrant(writeGrants, w)
@@ -172,6 +189,7 @@ func compileAppContainer(s Spec) (*Plan, error) {
 			"appcontainer has no ephemeral/shadow overlay; writes outside writable paths are denied")
 		caveats = append(caveats,
 			"appcontainer scoped writes temporarily grant ACL access to the AppContainer SID; unclean exits can leave the grant behind")
+		caveats = append(caveats, appContainerAmbientWriteCaveat)
 	}
 
 	childRestricted := false
@@ -189,18 +207,24 @@ func compileAppContainer(s Spec) (*Plan, error) {
 		caveats = append(caveats, "appcontainer memory limit is a job-object whole-job commit cap; exceeding it fails allocations rather than killing the process immediately; file-backed/shared mappings and working-set growth are not counted toward the commit cap, so physical footprint can exceed the requested limit")
 	}
 
+	var fs *fsVirtualizationPlan
+	if s.Write == WriteEphemeral {
+		fs = &fsVirtualizationPlan{Kind: fsVirtualizationWindowsWorkspaceCopy}
+	}
+
 	argv := append([]string{exe}, s.Args[1:]...)
 	profile := &acProfile{
-		ProfileName:     appContainerProfileName(),
-		Exe:             exe,
-		WorkDir:         workDir,
-		Argv:            argv,
-		CapabilitySIDs:  append([]acCapabilitySID(nil), capSIDs...),
-		ReadGrants:      append([]string(nil), readGrants...),
-		WriteGrants:     append([]string(nil), writeGrants...),
-		ChildRestricted: childRestricted,
-		CPUs:            s.CPUs,
-		MemoryBytes:     s.MemoryBytes,
+		ProfileName:      appContainerProfileName(),
+		Exe:              exe,
+		WorkDir:          workDir,
+		Argv:             argv,
+		CapabilitySIDs:   append([]acCapabilitySID(nil), capSIDs...),
+		ReadGrants:       append([]string(nil), readGrants...),
+		WriteGrants:      append([]string(nil), writeGrants...),
+		DeriveOnlyLowbox: deriveOnlyLowbox,
+		ChildRestricted:  childRestricted,
+		CPUs:             s.CPUs,
+		MemoryBytes:      s.MemoryBytes,
 	}
 
 	return &Plan{
@@ -210,6 +234,7 @@ func compileAppContainer(s Spec) (*Plan, error) {
 		Uses:    uses,
 		Caveats: caveats,
 		ac:      profile,
+		fs:      fs,
 	}, nil
 }
 
@@ -279,7 +304,8 @@ func (c *acNameCounter) next() uint64 {
 	return c.n
 }
 
-const appContainerWriteDenyCaveat = "appcontainer cannot deny all writes: the per-profile storage under %LOCALAPPDATA%\\Packages\\<AppContainer>\\AC and per-app TEMP/TMP remain writable; only host paths outside that profile are blocked"
+const appContainerWriteDenyCaveat = "appcontainer WriteNone uses a derive-only lowbox with no per-profile storage grant; host paths remain writable if they already grant write access to ALL APPLICATION PACKAGES"
+const appContainerAmbientWriteCaveat = "appcontainer derive-only lowbox avoids per-profile storage, but cannot revoke ambient write access already granted to ALL APPLICATION PACKAGES"
 
 const appContainerNoExecCaveat = "appcontainer enforces no-exec via PROCESS_CREATION_CHILD_PROCESS_RESTRICTED, which is stricter than the isobox contract: ALL child-process creation (including fork-like CreateProcess for the same image) is blocked, not just exec of a new image; it does not stop a process created on the sandbox's behalf by a reachable out-of-process broker (COM/RPC/WinRT activation), which runs outside the restriction"
 
@@ -299,6 +325,9 @@ func renderAppContainerProfile(p *acProfile) string {
 		}
 	}
 	b.WriteByte('\n')
+	if p.DeriveOnlyLowbox {
+		b.WriteString("  profile storage: derive-only\n")
+	}
 	b.WriteString("  read grants:")
 	if len(p.ReadGrants) == 0 {
 		b.WriteString(" none")
