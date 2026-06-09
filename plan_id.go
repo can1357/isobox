@@ -14,6 +14,8 @@ func stableSpecID(prefix string, s Spec) string {
 	writeHashSlice(h, s.Args)
 	writeHashString(h, s.Dir)
 	writeHashSlice(h, s.Env)
+	writeHashSlice(h, s.EnvAllow)
+	writeHashSlice(h, s.EnvDeny)
 	writeHashString(h, s.Net.String())
 	writeHashString(h, s.Write.String())
 	writeHashSlice(h, s.Writable)

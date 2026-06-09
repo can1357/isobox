@@ -97,6 +97,9 @@ func RunClientProbe(cfg ClientConfig) (ClientReport, error) {
 	case ProbeKernelInfo:
 		runKernelInfoProbe(&report)
 		return report, nil
+	case ProbeTTYIoctl:
+		runTTYIoctlProbe(&report)
+		return report, nil
 	default:
 		return report, fmt.Errorf("unknown probe %q", cfg.Probe)
 	}

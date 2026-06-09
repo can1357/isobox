@@ -12,6 +12,7 @@ const (
 	ProbeIPC        Probe = "ipc"
 	ProbeMach       Probe = "mach"
 	ProbeKernelInfo Probe = "kernel-info"
+	ProbeTTYIoctl   Probe = "tty-ioctl"
 )
 
 // CheckResult records whether one client-side operation succeeded. Host-side

@@ -24,6 +24,20 @@ func ParseCPUs(s string) (float64, error) {
 	return v, nil
 }
 
+// ParsePIDs reads a process/task count. The empty string means "no limit" and
+// returns 0.
+func ParsePIDs(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || v < 0 {
+		return 0, fmt.Errorf("invalid pids %q (want a non-negative integer)", s)
+	}
+	return v, nil
+}
+
 // ParseMemory reads a byte count with an optional binary unit suffix
 // (k/kb, m/mb, g/gb, t/tb; 1024-based). A bare number is bytes. The empty
 // string means "no limit" and returns 0.

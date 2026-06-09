@@ -27,6 +27,7 @@ func TestDockerArgvShapeNameAndDefaults(t *testing.T) {
 	}
 	want := []string{
 		dockerBinary, "run", "--rm", "--name", stableSpecID("isobox", spec), "--ipc", "private",
+		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		"--read-only", "--tmpfs", "/tmp", "--tmpfs", "/run",
 		"alpine:3.20", "sh", "-c", "echo hi",
 	}
@@ -38,6 +39,26 @@ func TestDockerArgvShapeNameAndDefaults(t *testing.T) {
 	}
 	if !p.Uses.Has(CapIPCRestrict) {
 		t.Fatalf("docker default plan must surface ipc.restrict: %v", p.Uses.List())
+	}
+}
+
+func TestDockerHardeningFlags(t *testing.T) {
+	t.Setenv(dockerImageEnv, "alpine")
+	p, err := compileDockerEphemeral(Spec{Args: []string{"true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgPair(p.Argv, "--cap-drop", "ALL") {
+		t.Fatalf("--cap-drop ALL missing: %v", p.Argv)
+	}
+	if !hasArgPair(p.Argv, "--security-opt", "no-new-privileges") {
+		t.Fatalf("--security-opt no-new-privileges missing: %v", p.Argv)
+	}
+	if argvHas(p.Argv, "--user") || argvHas(p.Argv, "-u") {
+		t.Fatalf("docker backend must not fake a portable non-root user: %v", p.Argv)
+	}
+	if !caveatsContain(p.Caveats, "portable non-root uid would break writes to host bind mounts") {
+		t.Fatalf("missing non-root user caveat: %v", p.Caveats)
 	}
 }
 
@@ -170,6 +191,9 @@ func TestDockerNetworkMappings(t *testing.T) {
 			if tc.net == NetOutbound && !caveatsContain(p.Caveats, "UDP bind") {
 				t.Fatalf("outbound caveat must mention UDP bind ambiguity: %v", p.Caveats)
 			}
+			if tc.net == NetOutbound && !caveatsContain(p.Caveats, "not an egress filter") {
+				t.Fatalf("outbound caveat must mention unrestricted egress/exfiltration risk: %v", p.Caveats)
+			}
 		})
 	}
 }
@@ -191,11 +215,16 @@ func TestDockerOutboundSeccompMaterialization(t *testing.T) {
 	if reflect.DeepEqual(argv, p.Argv) || hasArgPair(argv, "--security-opt", dockerSeccompSecurityOpt()) {
 		t.Fatalf("seccomp placeholder was not rewritten: %v", argv)
 	}
-	idx := argvIndex(argv, "--security-opt")
-	if idx < 0 || idx+1 >= len(argv) || !strings.HasPrefix(argv[idx+1], "seccomp=") {
+	var path string
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "--security-opt" && strings.HasPrefix(argv[i+1], "seccomp=") {
+			path = strings.TrimPrefix(argv[i+1], "seccomp=")
+			break
+		}
+	}
+	if path == "" {
 		t.Fatalf("missing materialized seccomp security-opt: %v", argv)
 	}
-	path := strings.TrimPrefix(argv[idx+1], "seccomp=")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -529,7 +558,7 @@ func caveatsContain(caveats []string, substr string) bool {
 
 func TestDockerResourceLimitFlags(t *testing.T) {
 	t.Setenv(dockerImageEnv, "alpine")
-	p, err := compileDockerEphemeral(Spec{Args: []string{"true"}, Net: NetEnable, CPUs: 1.5, MemoryBytes: 512 << 20})
+	p, err := compileDockerEphemeral(Spec{Args: []string{"true"}, Net: NetEnable, CPUs: 1.5, MemoryBytes: 512 << 20, PIDs: 64})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,7 +571,10 @@ func TestDockerResourceLimitFlags(t *testing.T) {
 	if !hasArgPair(p.Argv, "--memory-swap", "536870912") {
 		t.Fatalf("--memory-swap bytes missing: %v", p.Argv)
 	}
-	if !p.Uses.Has(CapResCPU) || !p.Uses.Has(CapResMemory) {
+	if !hasArgPair(p.Argv, "--pids-limit", "64") {
+		t.Fatalf("--pids-limit 64 missing: %v", p.Argv)
+	}
+	if !p.Uses.Has(CapResCPU) || !p.Uses.Has(CapResMemory) || !p.Uses.Has(CapResPIDs) {
 		t.Fatalf("plan uses missing resource caps: %v", p.Uses.List())
 	}
 }
@@ -553,10 +585,10 @@ func TestDockerOmitsResourceFlagsWithoutLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if argvHas(p.Argv, "--cpus") || argvHas(p.Argv, "--memory") {
+	if argvHas(p.Argv, "--cpus") || argvHas(p.Argv, "--memory") || argvHas(p.Argv, "--pids-limit") {
 		t.Fatalf("no limits must omit resource flags: %v", p.Argv)
 	}
-	if p.Uses.Has(CapResCPU) || p.Uses.Has(CapResMemory) {
+	if p.Uses.Has(CapResCPU) || p.Uses.Has(CapResMemory) || p.Uses.Has(CapResPIDs) {
 		t.Fatalf("no limits must not claim resource caps: %v", p.Uses.List())
 	}
 }

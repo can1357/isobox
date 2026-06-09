@@ -198,7 +198,7 @@ func runAppContainer(ctx context.Context, plan *Plan, s Spec, streams Stdio) (ex
 			return -1, fmt.Errorf("isobox: encoding working directory: %w", err)
 		}
 	}
-	envBlock, err := windowsEnvironmentBlock(s.Env)
+	envBlock, err := windowsEnvironmentBlock(finalEnv(s, nil))
 	if err != nil {
 		return -1, err
 	}
@@ -218,7 +218,7 @@ func runAppContainer(ctx context.Context, plan *Plan, s Spec, streams Stdio) (ex
 		ProcThreadAttributeList: attrs.List(),
 	}
 	var pi windows.ProcessInformation
-	limited := profile.CPUs > 0 || profile.MemoryBytes > 0
+	limited := profile.CPUs > 0 || profile.MemoryBytes > 0 || profile.PIDs > 0
 	creationFlags := uint32(windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_UNICODE_ENVIRONMENT)
 	if limited {
 		// Start suspended so the resource-limit job is attached before the
@@ -233,7 +233,7 @@ func runAppContainer(ctx context.Context, plan *Plan, s Spec, streams Stdio) (ex
 	stdio.closeChildHandles()
 	stdio.startPumps()
 	if limited {
-		job, err := applyResourceLimits(pi.Process, profile.CPUs, profile.MemoryBytes)
+		job, err := applyResourceLimits(pi.Process, profile.CPUs, profile.MemoryBytes, profile.PIDs)
 		if err != nil {
 			windows.TerminateProcess(pi.Process, 1)
 			return -1, err
@@ -264,11 +264,11 @@ func runAppContainer(ctx context.Context, plan *Plan, s Spec, streams Stdio) (ex
 	return int(exit), nil
 }
 
-// applyResourceLimits creates a job object that caps the process's memory
-// and/or CPU, then assigns the process to it. The returned job handle must be
-// kept open for the lifetime of the process; closing it (KILL_ON_JOB_CLOSE)
-// terminates any survivors.
-func applyResourceLimits(process windows.Handle, cpus float64, memoryBytes int64) (windows.Handle, error) {
+// applyResourceLimits creates a job object that caps the process's memory,
+// CPU, and/or active process count, then assigns the process to it. The returned
+// job handle must be kept open for the lifetime of the process; closing it
+// (KILL_ON_JOB_CLOSE) terminates any survivors.
+func applyResourceLimits(process windows.Handle, cpus float64, memoryBytes int64, pids int64) (windows.Handle, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return 0, fmt.Errorf("isobox: creating resource-limit job object: %w", err)
@@ -279,9 +279,13 @@ func applyResourceLimits(process windows.Handle, cpus float64, memoryBytes int64
 		info.BasicLimitInformation.LimitFlags |= windows.JOB_OBJECT_LIMIT_JOB_MEMORY
 		info.JobMemoryLimit = uintptr(memoryBytes)
 	}
+	if pids > 0 {
+		info.BasicLimitInformation.LimitFlags |= windows.JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+		info.BasicLimitInformation.ActiveProcessLimit = uint32(pids)
+	}
 	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
 		windows.CloseHandle(job)
-		return 0, fmt.Errorf("isobox: setting job memory limit: %w", err)
+		return 0, fmt.Errorf("isobox: setting job object limits: %w", err)
 	}
 	if cpus > 0 {
 		cpuInfo := jobObjectCPURateControlInformation{

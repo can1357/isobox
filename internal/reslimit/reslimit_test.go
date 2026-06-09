@@ -31,6 +31,32 @@ func TestParseCPUs(t *testing.T) {
 	}
 }
 
+func TestParsePIDs(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    int64
+		wantErr bool
+	}{
+		{"", 0, false},
+		{"  ", 0, false},
+		{"0", 0, false},
+		{"64", 64, false},
+		{"-1", 0, true},
+		{"1.5", 0, true},
+		{"abc", 0, true},
+	}
+	for _, tc := range cases {
+		got, err := ParsePIDs(tc.in)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("ParsePIDs(%q) err=%v, wantErr=%v", tc.in, err, tc.wantErr)
+			continue
+		}
+		if err == nil && got != tc.want {
+			t.Errorf("ParsePIDs(%q)=%d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestParseMemory(t *testing.T) {
 	cases := []struct {
 		in      string

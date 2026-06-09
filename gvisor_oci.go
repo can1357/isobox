@@ -33,6 +33,7 @@ type gvisorOCIPlan struct {
 	FSMounts          []ociMount
 	CPUs              float64
 	MemoryBytes       int64
+	PIDs              int64
 }
 
 func newGvisorOCIPlan(s Spec) *gvisorOCIPlan {
@@ -45,6 +46,7 @@ func newGvisorOCIPlan(s Spec) *gvisorOCIPlan {
 		EnableLoopback:    true,
 		CPUs:              s.CPUs,
 		MemoryBytes:       s.MemoryBytes,
+		PIDs:              s.PIDs,
 	}
 	if s.Net == NetOutbound {
 		// Strict AF_UNIX over-block: seccomp cannot distinguish socket families,
@@ -83,10 +85,7 @@ func gvisorOCIConfig(s Spec, p *gvisorOCIPlan, netnsPath string) ociConfig {
 	if cwd == "" {
 		cwd = "/"
 	}
-	env := s.Env
-	if env == nil {
-		env = os.Environ()
-	}
+	env := finalEnv(s, nil)
 	namespaces := []ociNamespace{
 		{Type: "pid"},
 		{Type: "mount"},
@@ -189,11 +188,11 @@ type ociMount struct {
 // to express a fractional CPU cap; quota = CPUs * period.
 const gvisorCPUPeriodMicros = 100_000
 
-// gvisorOCIResources builds the OCI linux.resources block from the plan's CPU
-// and memory limits, or nil when neither is set. runsc maps these onto the
-// sandbox's host cgroup.
+// gvisorOCIResources builds the OCI linux.resources block from the plan's CPU,
+// memory, and process-count limits, or nil when none is set. runsc maps these
+// onto the sandbox's host cgroup.
 func gvisorOCIResources(p *gvisorOCIPlan) *ociResources {
-	if p == nil || (p.CPUs <= 0 && p.MemoryBytes <= 0) {
+	if p == nil || (p.CPUs <= 0 && p.MemoryBytes <= 0 && p.PIDs <= 0) {
 		return nil
 	}
 	res := &ociResources{}
@@ -210,6 +209,9 @@ func gvisorOCIResources(p *gvisorOCIPlan) *ociResources {
 		swap := p.MemoryBytes
 		res.Memory = &ociMemory{Limit: &limit, Swap: &swap}
 	}
+	if p.PIDs > 0 {
+		res.Pids = &ociPids{Limit: p.PIDs}
+	}
 	return res
 }
 
@@ -222,6 +224,7 @@ type ociLinux struct {
 type ociResources struct {
 	CPU    *ociCPU    `json:"cpu,omitempty"`
 	Memory *ociMemory `json:"memory,omitempty"`
+	Pids   *ociPids   `json:"pids,omitempty"`
 }
 
 type ociCPU struct {
@@ -232,6 +235,10 @@ type ociCPU struct {
 type ociMemory struct {
 	Limit *int64 `json:"limit,omitempty"`
 	Swap  *int64 `json:"swap,omitempty"`
+}
+
+type ociPids struct {
+	Limit int64 `json:"limit"`
 }
 
 type ociNamespace struct {
@@ -271,7 +278,9 @@ func runGvisor(ctx context.Context, plan *Plan, s Spec, streams Stdio) (int, err
 		if fsRuntime.Cleanup != nil {
 			defer func() { _ = fsRuntime.Cleanup() }()
 		}
-		s.Env = commandEnv(s.Env, fsRuntime.Env)
+		s.Env = finalEnv(s, fsRuntime.Env)
+		s.EnvAllow = nil
+		s.EnvDeny = nil
 		if fsRuntime.Dir != "" {
 			s.Dir = fsRuntime.Dir
 		}

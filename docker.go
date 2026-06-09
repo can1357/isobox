@@ -53,6 +53,7 @@ func compileDocker(s Spec, backend Backend, runtime string, forceRunsc bool) (*P
 	uses := NewCapabilitySet()
 	caveats := []string{
 		fmt.Sprintf("%s runs the command inside the configured image; host executables and unmounted host paths are not available", label),
+		fmt.Sprintf("%s keeps Docker's image-default user because no Spec user exists and a portable non-root uid would break writes to host bind mounts with normal host ownership; it still drops Linux capabilities and forbids privilege escalation", label),
 	}
 	if len(s.MachAllow) > 0 {
 		caveats = append(caveats, fmt.Sprintf("Mach service allow-list is macOS Seatbelt-only; ignored on %s", label))
@@ -93,6 +94,7 @@ func compileDocker(s Spec, backend Backend, runtime string, forceRunsc bool) (*P
 		uses = uses.Union(NewCapabilitySet(CapFSWriteScope))
 		caveats = append(caveats, fmt.Sprintf("%s WriteScope persists writes through writable bind mounts only; other container paths remain read-only", label))
 		caveats = append(caveats, "docker scoped writes are path/mount based; hardlinks or nested host mountpoints under writable paths can affect host objects outside the lexical scope")
+		caveats = append(caveats, diskQuotaCaveat)
 	case WriteEphemeral:
 		caveats = append(caveats, fmt.Sprintf("%s WriteEphemeral uses Docker's disposable container writable layer; writes are discarded with --rm; explicitly readable host paths remain read-only bind mounts and are not made ephemeral", label))
 		uses = uses.Union(NewCapabilitySet(CapFSWriteEphemeral))
@@ -100,6 +102,7 @@ func compileDocker(s Spec, backend Backend, runtime string, forceRunsc bool) (*P
 		uses = uses.Union(NewCapabilitySet(CapFSWriteScope))
 		caveats = append(caveats, fmt.Sprintf("%s has no hybrid shadow layer; writes outside writable bind mounts are denied by the read-only root", label))
 		caveats = append(caveats, "docker scoped writes are path/mount based; hardlinks or nested host mountpoints under writable paths can affect host objects outside the lexical scope")
+		caveats = append(caveats, diskQuotaCaveat)
 	}
 	if s.NoExec {
 		caveats = append(caveats, fmt.Sprintf("%s does not enforce proc.no_exec", label))
@@ -111,6 +114,8 @@ func compileDocker(s Spec, backend Backend, runtime string, forceRunsc bool) (*P
 		"--rm",
 		"--name", stableSpecID("isobox", s),
 		"--ipc", "private",
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges",
 	}
 	if runtime != "" {
 		argv = append(argv, "--runtime", runtime)
@@ -158,6 +163,10 @@ func compileDocker(s Spec, backend Backend, runtime string, forceRunsc bool) (*P
 		argv = append(argv, "--memory", strconv.FormatInt(s.MemoryBytes, 10), "--memory-swap", strconv.FormatInt(s.MemoryBytes, 10))
 		uses = uses.Union(NewCapabilitySet(CapResMemory))
 	}
+	if s.PIDs > 0 {
+		argv = append(argv, "--pids-limit", strconv.FormatInt(s.PIDs, 10))
+		uses = uses.Union(NewCapabilitySet(CapResPIDs))
+	}
 
 	switch s.Net {
 	case NetDisable:
@@ -168,7 +177,17 @@ func compileDocker(s Spec, backend Backend, runtime string, forceRunsc bool) (*P
 	case NetOutbound:
 		argv = append(argv, "--security-opt", dockerSeccompSecurityOpt())
 		uses = uses.Union(NewCapabilitySet(CapNetOutbound))
-		caveats = append(caveats, fmt.Sprintf("%s net.outbound denies TCP listen/accept/accept4 with a Docker seccomp profile; UDP bind may still be creatable, and the syscall-wide deny also blocks AF_UNIX stream servers", label))
+		caveats = append(caveats, netOutboundExfiltrationCaveat, fmt.Sprintf("%s net.outbound denies TCP listen/accept/accept4 with a Docker seccomp profile; UDP bind may still be creatable, and the syscall-wide deny also blocks AF_UNIX stream servers", label))
+	}
+
+	if envScrubActive(s) {
+		uses = uses.Union(NewCapabilitySet(CapEnvScrub))
+	}
+
+	if s.Env != nil || envScrubActive(s) {
+		for _, entry := range finalEnv(s, nil) {
+			argv = append(argv, "--env", envName(entry))
+		}
 	}
 
 	argv = append(argv, image)

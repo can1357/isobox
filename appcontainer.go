@@ -51,6 +51,7 @@ type acProfile struct {
 	ChildRestricted  bool
 	CPUs             float64
 	MemoryBytes      int64
+	PIDs             int64
 }
 
 // compileAppContainer turns a Spec into a Windows AppContainer plan. It is pure:
@@ -86,7 +87,7 @@ func compileAppContainer(s Spec) (*Plan, error) {
 	case NetOutbound:
 		capSIDs = append(capSIDs, acWinCapabilityInternetClientSid)
 		uses = uses.Union(NewCapabilitySet(CapNetOutbound))
-		caveats = append(caveats,
+		caveats = append(caveats, netOutboundExfiltrationCaveat,
 			"appcontainer net.outbound is limited to InternetClient; private-network outbound is denied to keep server/listen blocked")
 	}
 
@@ -176,6 +177,7 @@ func compileAppContainer(s Spec) (*Plan, error) {
 			"appcontainer scoped writes temporarily grant ACL access to the AppContainer SID; unclean exits can leave the grant behind")
 		caveats = append(caveats, "appcontainer scoped write grants are path ACL based; hardlinks inside writable paths can modify the same file object through out-of-scope aliases")
 		caveats = append(caveats, appContainerAmbientWriteCaveat)
+		caveats = append(caveats, diskQuotaCaveat)
 	case WriteEphemeral:
 		deriveOnlyLowbox = true
 		writeGrants = appendGrant(writeGrants, isoboxEphemeralRootPlaceholder)
@@ -201,6 +203,7 @@ func compileAppContainer(s Spec) (*Plan, error) {
 			"appcontainer scoped writes temporarily grant ACL access to the AppContainer SID; unclean exits can leave the grant behind")
 		caveats = append(caveats, "appcontainer scoped write grants are path ACL based; hardlinks inside writable paths can modify the same file object through out-of-scope aliases")
 		caveats = append(caveats, appContainerAmbientWriteCaveat)
+		caveats = append(caveats, diskQuotaCaveat)
 	}
 
 	childRestricted := false
@@ -216,6 +219,14 @@ func compileAppContainer(s Spec) (*Plan, error) {
 	if s.MemoryBytes > 0 {
 		uses = uses.Union(NewCapabilitySet(CapResMemory))
 		caveats = append(caveats, "appcontainer memory limit is a job-object whole-job commit cap; exceeding it fails allocations rather than killing the process immediately; file-backed/shared mappings and working-set growth are not counted toward the commit cap, so physical footprint can exceed the requested limit")
+	}
+	if s.PIDs > 0 {
+		uses = uses.Union(NewCapabilitySet(CapResPIDs))
+		caveats = append(caveats, "appcontainer process-count limit is a Windows job-object active-process cap")
+	}
+
+	if envScrubActive(s) {
+		uses = uses.Union(NewCapabilitySet(CapEnvScrub))
 	}
 
 	var fs *fsVirtualizationPlan
@@ -238,6 +249,7 @@ func compileAppContainer(s Spec) (*Plan, error) {
 		ChildRestricted:  childRestricted,
 		CPUs:             s.CPUs,
 		MemoryBytes:      s.MemoryBytes,
+		PIDs:             s.PIDs,
 	}
 
 	return &Plan{
@@ -377,6 +389,9 @@ func renderAppContainerProfile(p *acProfile) string {
 	}
 	if p.MemoryBytes > 0 {
 		fmt.Fprintf(&b, "  memory limit: %d bytes\n", p.MemoryBytes)
+	}
+	if p.PIDs > 0 {
+		fmt.Fprintf(&b, "  process limit: %d\n", p.PIDs)
 	}
 	return b.String()
 }

@@ -187,7 +187,7 @@ func dockerRunImageIndex(argv []string) (int, bool) {
 
 func dockerRunOptionTakesValue(option string) bool {
 	switch option {
-	case "--name", "--ipc", "--runtime", "--tmpfs", "--mount", "--workdir", "--cpus", "--memory", "--memory-swap", "--network", "--security-opt":
+	case "--name", "--ipc", "--runtime", "--tmpfs", "--mount", "--workdir", "--cpus", "--memory", "--memory-swap", "--pids-limit", "--network", "--security-opt":
 		return true
 	default:
 		return false

@@ -21,7 +21,7 @@ func compileGvisor(s Spec) (*Plan, error) {
 	}
 	var flags []string
 	needsFSView := len(s.Readable) > 0 || len(s.ReadDeny) > 0 || s.Write == WriteScope || s.Write == WriteOverlay
-	needsOCI := s.Net == NetOutbound || s.NoExec || needsFSView || s.CPUs > 0 || s.MemoryBytes > 0
+	needsOCI := s.Net == NetOutbound || s.NoExec || needsFSView || s.CPUs > 0 || s.MemoryBytes > 0 || s.PIDs > 0
 	var fs *fsVirtualizationPlan
 	preloadFallback := false
 	if needsFSView {
@@ -52,7 +52,7 @@ func compileGvisor(s Spec) (*Plan, error) {
 		uses = uses.Union(NewCapabilitySet(CapNetEnable))
 	case NetOutbound:
 		uses = uses.Union(NewCapabilitySet(CapNetOutbound))
-		caveats = append(caveats,
+		caveats = append(caveats, netOutboundExfiltrationCaveat,
 			"gvisor net.outbound denies TCP listen/accept/accept4; UDP bind may still be creatable, and the syscall-wide deny also blocks AF_UNIX stream servers")
 	}
 
@@ -86,11 +86,14 @@ func compileGvisor(s Spec) (*Plan, error) {
 		uses = uses.Union(NewCapabilitySet(CapFSWriteEphemeral))
 		caveats = append(caveats,
 			"gvisor overlay flag syntax varies by runsc version (used --overlay2=all:memory)")
+		caveats = append(caveats,
+			"gvisor memory overlays keep non-persistent writes off host disk, but behavior can vary by runsc overlay mode/version")
 	case WriteScope:
 		if !preloadFallback {
 			uses = uses.Union(NewCapabilitySet(CapFSWriteScope))
 		}
 		caveats = append(caveats, "gvisor scoped writes are path/mount based; hardlinks or nested host mountpoints under writable paths can affect host objects outside the lexical scope")
+		caveats = append(caveats, diskQuotaCaveat)
 	case WriteOverlay:
 		flags = append(flags, "--overlay2=root:memory")
 		if !preloadFallback {
@@ -99,6 +102,9 @@ func compileGvisor(s Spec) (*Plan, error) {
 		caveats = append(caveats,
 			"gvisor overlay flag syntax varies by runsc version (used --overlay2=root:memory)")
 		caveats = append(caveats, "gvisor scoped writes are path/mount based; hardlinks or nested host mountpoints under writable paths can affect host objects outside the lexical scope")
+		caveats = append(caveats, diskQuotaCaveat)
+		caveats = append(caveats,
+			"gvisor memory overlays keep outside-bind writes off host disk, but writable bind mounts still consume host disk and runsc overlay behavior can vary by mode/version")
 	}
 
 	if s.NoExec {
@@ -114,6 +120,15 @@ func compileGvisor(s Spec) (*Plan, error) {
 		caveats = append(caveats,
 			"gvisor memory and swap limits are charged to the sandbox's host cgroup via runsc; enforcement requires cgroup support on the host")
 	}
+	if s.PIDs > 0 {
+		uses = uses.Union(NewCapabilitySet(CapResPIDs))
+		caveats = append(caveats,
+			"gvisor process-count limit is applied to the sandbox's host cgroup via runsc; enforcement requires pids cgroup support on the host")
+	}
+	if envScrubActive(s) {
+		uses = uses.Union(NewCapabilitySet(CapEnvScrub))
+	}
+
 	if os.Getenv("ISOBOX_RUNSC") != "" {
 		caveats = append(caveats, "kernel.isolation assumes ISOBOX_RUNSC points at a genuine gVisor runsc; a non-gVisor runtime would run on the host kernel without userspace-kernel isolation")
 	}

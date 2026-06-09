@@ -39,7 +39,8 @@ const (
 	// CapNetEnable permits network access.
 	CapNetEnable Capability = "net.enable"
 	// CapNetOutbound permits outbound connections and blocks TCP server setup.
-	// UDP bind and non-IP socket behavior are backend-specific caveats.
+	// It is not an egress filter; allowed outbound connections can exfiltrate
+	// data unless the caller or surrounding network constrains them.
 	CapNetOutbound Capability = "net.outbound"
 	// CapFSReadHost grants broad read access to the host filesystem.
 	CapFSReadHost Capability = "fs.read.host"
@@ -58,6 +59,8 @@ const (
 	// host inputs are not modified, and backend scope/coverage is surfaced in
 	// caveats.
 	CapFSWriteEphemeral Capability = "fs.write.ephemeral"
+	// CapEnvScrub removes selected environment variables before process launch.
+	CapEnvScrub Capability = "env.scrub"
 	// CapProcNoExec forbids creating a new program image after launch.
 	CapProcNoExec Capability = "proc.no_exec"
 	// CapKernelIsolation serves syscalls from a user-space kernel, shielding the
@@ -71,26 +74,34 @@ const (
 	CapResCPU Capability = "res.cpu"
 	// CapResMemory caps the sandbox's memory footprint in bytes.
 	CapResMemory Capability = "res.memory"
+	// CapResPIDs caps the sandbox's process/task count.
+	CapResPIDs Capability = "res.pids"
 )
 
 // capDescriptions documents every capability isobox knows about.
 var capDescriptions = map[Capability]string{
 	CapNetDisable:       "deny network access; some backends additionally block loopback (see caveats)",
 	CapNetEnable:        "permit network access",
-	CapNetOutbound:      "permit outbound connections; block inbound TCP listeners",
+	CapNetOutbound:      "permit outbound connections; block inbound TCP listeners; not a domain/CIDR allowlist",
 	CapFSReadHost:       "read the host filesystem broadly",
 	CapFSReadScope:      "restrict host/user filesystem reads to an allowlist plus backend runtime paths",
 	CapFSReadDeny:       "read broadly except denied sensitive paths",
 	CapFSWriteDeny:      "deny all writes to the host filesystem",
 	CapFSWriteScope:     "permit writes under listed paths plus opt-in temp roots; listed-path writes persist",
 	CapFSWriteEphemeral: "permit backend ephemeral writes; configured host inputs stay untouched",
+	CapEnvScrub:         "scrub inherited environment variables by name pattern before launch",
 	CapProcNoExec:       "forbid executing another program image",
 	CapKernelIsolation:  "serve syscalls from a user-space kernel; shield host kernel",
 	CapIPCRestrict:      "no host local IPC endpoint reachable",
 	CapMachRestrict:     "restrict Mach service lookups (Seatbelt-only)",
 	CapResCPU:           "limit CPU usage to a fraction of the host's cores",
 	CapResMemory:        "limit the sandbox's memory footprint",
+	CapResPIDs:          "limit the sandbox's process/task count",
 }
+
+const netOutboundExfiltrationCaveat = "net.outbound is not an egress filter or domain/CIDR allowlist; permitted outbound connections can exfiltrate data unless the caller or surrounding network constrains them"
+
+const diskQuotaCaveat = "isobox does not enforce res.disk; scoped/persistent writes can fill the backing host filesystem unless separately constrained"
 
 // Describe returns a human-readable description of a capability.
 func (c Capability) Describe() string { return capDescriptions[c] }
@@ -103,15 +114,17 @@ var backendCaps = map[Backend]CapabilitySet{
 		CapNetDisable, CapNetEnable, CapNetOutbound,
 		CapFSReadHost, CapFSReadScope, CapFSReadDeny,
 		CapFSWriteDeny, CapFSWriteScope, CapFSWriteEphemeral,
+		CapEnvScrub,
 		CapMachRestrict,
 	),
 	BackendGvisor: NewCapabilitySet(
 		CapNetDisable, CapNetEnable, CapNetOutbound,
 		CapFSReadHost, CapFSReadScope, CapFSReadDeny,
 		CapFSWriteDeny, CapFSWriteScope, CapFSWriteEphemeral,
+		CapEnvScrub,
 		CapProcNoExec,
 		CapKernelIsolation, CapIPCRestrict,
-		CapResCPU, CapResMemory,
+		CapResCPU, CapResMemory, CapResPIDs,
 	),
 	BackendAppContainer: NewCapabilitySet(
 		CapNetDisable, CapNetEnable, CapNetOutbound,
@@ -119,26 +132,29 @@ var backendCaps = map[Backend]CapabilitySet{
 		CapFSWriteDeny,
 		CapFSWriteEphemeral,
 		CapFSWriteScope,
+		CapEnvScrub,
 		CapProcNoExec,
 		CapIPCRestrict,
-		CapResCPU, CapResMemory,
+		CapResCPU, CapResMemory, CapResPIDs,
 	),
 	BackendDockerEphemeral: NewCapabilitySet(
 		CapNetDisable, CapNetEnable, CapNetOutbound,
 		CapFSWriteDeny,
 		CapFSWriteEphemeral,
 		CapFSReadScope, CapFSWriteScope,
+		CapEnvScrub,
 		CapIPCRestrict,
-		CapResCPU, CapResMemory,
+		CapResCPU, CapResMemory, CapResPIDs,
 	),
 	BackendDockerRunscEphemeral: NewCapabilitySet(
 		CapNetDisable, CapNetEnable, CapNetOutbound,
 		CapFSWriteDeny,
 		CapFSWriteEphemeral,
 		CapFSReadScope, CapFSWriteScope,
+		CapEnvScrub,
 		CapIPCRestrict,
 		CapKernelIsolation,
-		CapResCPU, CapResMemory,
+		CapResCPU, CapResMemory, CapResPIDs,
 	),
 }
 

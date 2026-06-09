@@ -85,6 +85,9 @@ func TestSeatbeltOverlayDegradesOutsideWritesToDeny(t *testing.T) {
 			t.Fatalf("overlay profile missing %q:\n%s", frag, p.Profile)
 		}
 	}
+	if !caveatsContain(p.Caveats, "not an egress filter") {
+		t.Fatalf("outbound caveat must mention unrestricted egress/exfiltration risk: %v", p.Caveats)
+	}
 	if !p.Uses.Has(CapFSWriteScope) || p.Uses.Has(CapFSWriteEphemeral) {
 		t.Fatalf("Seatbelt overlay should enforce scoped writes only, got %v", p.Uses.List())
 	}
@@ -93,6 +96,9 @@ func TestSeatbeltOverlayDegradesOutsideWritesToDeny(t *testing.T) {
 	}
 	if !caveatsContain(p.Caveats, "cannot redirect writes outside writable paths") {
 		t.Fatalf("overlay caveat missing: %v", p.Caveats)
+	}
+	if !caveatsContain(p.Caveats, "does not enforce res.disk") {
+		t.Fatalf("overlay disk-quota caveat missing: %v", p.Caveats)
 	}
 }
 
@@ -326,11 +332,11 @@ func TestSeatbeltScopedReadWideningCaveat(t *testing.T) {
 }
 
 func TestSeatbeltResourceLimitsCaveatedNotEnforced(t *testing.T) {
-	p, err := compileSeatbelt(Spec{Args: []string{"/bin/echo"}, CPUs: 2, MemoryBytes: 1 << 30})
+	p, err := compileSeatbelt(Spec{Args: []string{"/bin/echo"}, CPUs: 2, MemoryBytes: 1 << 30, PIDs: 64})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Uses.Has(CapResCPU) || p.Uses.Has(CapResMemory) {
+	if p.Uses.Has(CapResCPU) || p.Uses.Has(CapResMemory) || p.Uses.Has(CapResPIDs) {
 		t.Fatalf("Seatbelt must not claim to enforce resource limits: %v", p.Uses.List())
 	}
 	if p.resources == nil || p.resources.CPUs != 2 || p.resources.MemoryBytes != 1<<30 {
@@ -341,6 +347,9 @@ func TestSeatbeltResourceLimitsCaveatedNotEnforced(t *testing.T) {
 	}
 	if !caveatsContain(p.Caveats, "best-effort process-group memory watchdog") {
 		t.Fatalf("missing memory watchdog caveat: %v", p.Caveats)
+	}
+	if !caveatsContain(p.Caveats, "does not advertise res.pids") {
+		t.Fatalf("missing PIDs unsupported caveat: %v", p.Caveats)
 	}
 }
 

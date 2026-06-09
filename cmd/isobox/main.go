@@ -7,12 +7,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/can1357/isobox"
 	"github.com/can1357/isobox/internal/reslimit"
@@ -24,6 +26,20 @@ func (s *stringList) String() string { return strings.Join(*s, ",") }
 func (s *stringList) Set(v string) error {
 	*s = append(*s, v)
 	return nil
+}
+
+// agentEnvDenyDefaultPatterns are glob-style environment variable name patterns
+// scrubbed by the default agent profile. They mirror the read-deny defaults for
+// common credential sources without turning the profile into an allowlist.
+var agentEnvDenyDefaultPatterns = []string{
+	"*_TOKEN",
+	"*_KEY",
+	"*_SECRET",
+	"AWS_*",
+	"GITHUB_*",
+	"ANTHROPIC_*",
+	"OPENAI_*",
+	"SSH_AUTH_SOCK",
 }
 
 func newFlagSet() *flag.FlagSet {
@@ -52,11 +68,15 @@ func run() int {
 	fs := newFlagSet()
 	var (
 		profile     = fs.String("profile", "agent", "policy profile: agent|tight")
-		netFlag     = fs.String("net", "disable", "network policy: disable|enable|outbound")
+		netFlag     = fs.String("net", "disable", "network policy: disable|enable|outbound (outbound is not an egress allowlist)")
 		writeFlag   = fs.String("write", "none", "write policy: none|scope|ephemeral|overlay")
 		cpusFlag    = fs.String("cpus", "", "limit CPU usage to this many logical cores (e.g. 1.5); empty means no limit")
 		memFlag     = fs.String("memory", "", "limit memory (e.g. 512m, 2g, or raw bytes); empty means no limit")
+		pidsFlag    = fs.String("pids", "", "limit process/task count; empty means no limit")
+		timeoutFlag = fs.Duration("timeout", 0, "wall-clock timeout for the command as a Go duration (e.g. 30s, 5m); zero means no timeout")
 		writable    stringList
+		envAllow    stringList
+		envDeny     stringList
 		readable    stringList
 		readDeny    stringList
 		machAllow   stringList
@@ -70,6 +90,8 @@ func run() int {
 		showVersion = fs.Bool("version", false, "print version information and exit")
 	)
 	fs.Var(&writable, "writable", "path the sandbox may write (repeatable)")
+	fs.Var(&envAllow, "env-allow", "environment variable name or glob to keep (repeatable)")
+	fs.Var(&envDeny, "env-deny", "environment variable name or glob to remove (repeatable)")
 	fs.Var(&readable, "readable", "restrict reads to this path (repeatable)")
 	fs.Var(&readDeny, "read-deny", "path the sandbox may not read (repeatable)")
 	fs.Var(&machAllow, "mach-allow", "Mach service global-name to allow (repeatable; Seatbelt)")
@@ -116,8 +138,19 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "isobox:", err)
 		return 2
 	}
+	pids, err := reslimit.ParsePIDs(*pidsFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "isobox:", err)
+		return 2
+	}
+	if *timeoutFlag < 0 {
+		fmt.Fprintln(os.Stderr, "isobox: timeout must be non-negative")
+		return 2
+	}
 	spec := isobox.Spec{
 		Args:        args,
+		EnvAllow:    isobox.EnvAllow(envAllow),
+		EnvDeny:     isobox.EnvDeny(envDeny),
 		Dir:         *dir,
 		Net:         net,
 		Write:       write,
@@ -130,6 +163,7 @@ func run() int {
 		Strict:      *strict,
 		CPUs:        cpus,
 		MemoryBytes: memBytes,
+		PIDs:        pids,
 	}
 	if err := applyProfile(*profile, &spec, seen); err != nil {
 		fmt.Fprintln(os.Stderr, "isobox:", err)
@@ -157,6 +191,8 @@ func run() int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, cancelTimeout := commandContext(ctx, *timeoutFlag)
+	defer cancelTimeout()
 
 	code, err := runner.Run(ctx, spec, isobox.Stdio{})
 	if err != nil {
@@ -164,6 +200,13 @@ func run() int {
 		return 1
 	}
 	return code
+}
+
+func commandContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(parent, timeout)
+	}
+	return parent, func() {}
 }
 
 func newRunner(backend string, spec isobox.Spec) (*isobox.Runner, error) {
@@ -214,6 +257,9 @@ func applyAgentProfile(spec *isobox.Spec, seen map[string]bool) {
 			spec.ReadDeny = appendPathUnique(spec.ReadDeny, p)
 		}
 	}
+	for _, pattern := range agentEnvDenyDefaults() {
+		spec.EnvDeny = appendStringUnique(spec.EnvDeny, pattern)
+	}
 }
 
 func profileWorkspacePath(spec *isobox.Spec) string {
@@ -221,6 +267,19 @@ func profileWorkspacePath(spec *isobox.Spec) string {
 		return spec.Dir
 	}
 	return "."
+}
+
+func appendStringUnique(values isobox.EnvDeny, value string) isobox.EnvDeny {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func agentEnvDenyDefaults() []string {
+	return append([]string(nil), agentEnvDenyDefaultPatterns...)
 }
 
 func appendPathUnique(paths []string, path string) []string {
@@ -332,7 +391,7 @@ func printPlan(w *os.File, p *isobox.Plan) {
 	}
 }
 
-func printCaps(w *os.File) {
+func printCaps(w io.Writer) {
 	inter := isobox.Intersection()
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	fmt.Fprint(tw, "CAPABILITY")

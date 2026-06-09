@@ -57,9 +57,11 @@ func TestCapabilityContracts(t *testing.T) {
 		CapFSWriteDeny,
 		CapFSWriteScope,
 		CapFSWriteEphemeral,
+		CapEnvScrub,
 		CapIPCRestrict,
 		CapResCPU,
 		CapResMemory,
+		CapResPIDs,
 	} {
 		if !inter.Has(c) {
 			t.Errorf("expected %s to be portable (in per-OS compatibility intersection)", c)
@@ -78,6 +80,12 @@ func TestCapabilityContracts(t *testing.T) {
 	}
 	if got := CapFSReadDeny.Describe(); got != "read broadly except denied sensitive paths" {
 		t.Fatalf("fs.read.deny description=%q", got)
+	}
+	if desc := CapNetOutbound.Describe(); !strings.Contains(desc, "not a domain/CIDR allowlist") {
+		t.Fatalf("net.outbound description must avoid implying egress filtering, got %q", desc)
+	}
+	if Union().Has(Capability("res.disk")) || Capability("res.disk").Describe() != "" {
+		t.Fatal("res.disk must not be advertised until a backend enforces a disk quota")
 	}
 	for _, c := range []Capability{CapNetOutbound, CapFSReadScope, CapFSReadDeny, CapFSWriteDeny, CapFSWriteScope, CapFSWriteEphemeral} {
 		if !CapsOf(BackendSeatbelt).Has(c) {
@@ -252,17 +260,17 @@ func TestNetDisableDescriptionAdmitsLoopbackVariance(t *testing.T) {
 func TestResourceLimitCapabilityContracts(t *testing.T) {
 	for _, b := range []Backend{BackendGvisor, BackendAppContainer, BackendDockerEphemeral, BackendDockerRunscEphemeral} {
 		caps := CapsOf(b)
-		if !caps.Has(CapResCPU) || !caps.Has(CapResMemory) {
-			t.Errorf("%s must advertise res.cpu and res.memory: %v", b, caps.List())
+		if !caps.Has(CapResCPU) || !caps.Has(CapResMemory) || !caps.Has(CapResPIDs) {
+			t.Errorf("%s must advertise res.cpu, res.memory, and res.pids: %v", b, caps.List())
 		}
 	}
-	if CapsOf(BackendSeatbelt).Has(CapResCPU) || CapsOf(BackendSeatbelt).Has(CapResMemory) {
-		t.Error("Seatbelt must not advertise resource limits; SBPL has no CPU/memory mechanism")
+	if CapsOf(BackendSeatbelt).Has(CapResCPU) || CapsOf(BackendSeatbelt).Has(CapResMemory) || CapsOf(BackendSeatbelt).Has(CapResPIDs) {
+		t.Error("Seatbelt must not advertise resource limits; SBPL has no CPU/memory/process-count mechanism")
 	}
-	if inter := Intersection(); !inter.Has(CapResCPU) || !inter.Has(CapResMemory) {
+	if inter := Intersection(); !inter.Has(CapResCPU) || !inter.Has(CapResMemory) || !inter.Has(CapResPIDs) {
 		t.Error("resource limits must be portable across OS-compatible backend unions")
 	}
-	if union := Union(); !union.Has(CapResCPU) || !union.Has(CapResMemory) {
+	if union := Union(); !union.Has(CapResCPU) || !union.Has(CapResMemory) || !union.Has(CapResPIDs) {
 		t.Error("resource limits must appear in the union of all backends")
 	}
 }

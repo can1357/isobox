@@ -92,6 +92,9 @@ func compileSeatbelt(s Spec) (*Plan, error) {
 	if s.MemoryBytes > 0 {
 		caveats = append(caveats, "Seatbelt has no kernel memory cap; isobox applies a best-effort process-group memory watchdog that can kill after an over-limit sample")
 	}
+	if s.PIDs > 0 {
+		caveats = append(caveats, "Seatbelt has no process-count limit primitive; isobox does not advertise res.pids on Seatbelt")
+	}
 	var b strings.Builder
 	// Start permissive, then carve away. In SBPL the last matching rule wins.
 	// Seatbelt can restrict Mach service lookup, but that is narrower than a
@@ -125,6 +128,7 @@ func compileSeatbelt(s Spec) (*Plan, error) {
 	case NetOutbound:
 		b.WriteString("(deny network-inbound)\n")
 		uses = uses.Union(NewCapabilitySet(CapNetOutbound))
+		caveats = append(caveats, netOutboundExfiltrationCaveat)
 	}
 
 	if len(s.Readable) > 0 {
@@ -198,6 +202,7 @@ func compileSeatbelt(s Spec) (*Plan, error) {
 		uses = uses.Union(NewCapabilitySet(CapFSWriteScope))
 		caveats = append(caveats,
 			"Seatbelt write-scope is path based; a hardlink inside a writable path can modify the same file object through an out-of-scope alias")
+		caveats = append(caveats, diskQuotaCaveat)
 	case WriteEphemeral:
 		b.WriteString(`(deny file-write* (subpath "/"))` + "\n")
 		sbplLiterals(&b, "allow", "file-write*", seatbeltDeviceWriteLiterals)
@@ -219,6 +224,11 @@ func compileSeatbelt(s Spec) (*Plan, error) {
 			"Seatbelt cannot redirect writes outside writable paths to an ephemeral/shadow filesystem; those writes are denied")
 		caveats = append(caveats,
 			"Seatbelt write-scope is path based; a hardlink inside a writable path can modify the same file object through an out-of-scope alias")
+		caveats = append(caveats, diskQuotaCaveat)
+	}
+
+	if envScrubActive(s) {
+		uses = uses.Union(NewCapabilitySet(CapEnvScrub))
 	}
 
 	if s.NoExec {

@@ -114,6 +114,9 @@ func TestAppContainerNetworkCapabilities(t *testing.T) {
 				if !caveatContains(p.Caveats, "InternetClient") {
 					t.Fatalf("outbound must explain InternetClient limitation: %v", p.Caveats)
 				}
+				if !caveatContains(p.Caveats, "not an egress filter") {
+					t.Fatalf("outbound must explain unrestricted egress/exfiltration risk: %v", p.Caveats)
+				}
 			}
 			if tc.caveat != "" && !caveatContains(p.Caveats, tc.caveat) {
 				t.Fatalf("missing caveat %q in %v", tc.caveat, p.Caveats)
@@ -413,17 +416,17 @@ func TestAppContainerProfileNameUniquePerRun(t *testing.T) {
 
 func TestAppContainerResourceLimits(t *testing.T) {
 	exe := testExecutable(t)
-	p, err := compileAppContainer(Spec{Args: []string{exe}, Net: NetEnable, CPUs: 1.5, MemoryBytes: 512 << 20})
+	p, err := compileAppContainer(Spec{Args: []string{exe}, Net: NetEnable, CPUs: 1.5, MemoryBytes: 512 << 20, PIDs: 64})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.ac.CPUs != 1.5 || p.ac.MemoryBytes != 512<<20 {
-		t.Fatalf("profile resource fields wrong: cpus=%v mem=%d", p.ac.CPUs, p.ac.MemoryBytes)
+	if p.ac.CPUs != 1.5 || p.ac.MemoryBytes != 512<<20 || p.ac.PIDs != 64 {
+		t.Fatalf("profile resource fields wrong: cpus=%v mem=%d pids=%d", p.ac.CPUs, p.ac.MemoryBytes, p.ac.PIDs)
 	}
-	if !p.Uses.Has(CapResCPU) || !p.Uses.Has(CapResMemory) {
+	if !p.Uses.Has(CapResCPU) || !p.Uses.Has(CapResMemory) || !p.Uses.Has(CapResPIDs) {
 		t.Fatalf("plan uses missing resource caps: %v", p.Uses.List())
 	}
-	for _, frag := range []string{"cpu limit: 1.5 cores", "memory limit: 536870912 bytes"} {
+	for _, frag := range []string{"cpu limit: 1.5 cores", "memory limit: 536870912 bytes", "process limit: 64"} {
 		if !profileHas(p.Profile, frag) {
 			t.Fatalf("profile missing %q:\n%s", frag, p.Profile)
 		}
@@ -436,10 +439,10 @@ func TestAppContainerOmitsResourceLinesWithoutLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Uses.Has(CapResCPU) || p.Uses.Has(CapResMemory) {
+	if p.Uses.Has(CapResCPU) || p.Uses.Has(CapResMemory) || p.Uses.Has(CapResPIDs) {
 		t.Fatalf("no limits must not claim resource caps: %v", p.Uses.List())
 	}
-	if strings.Contains(p.Profile, "cpu limit:") || strings.Contains(p.Profile, "memory limit:") {
+	if strings.Contains(p.Profile, "cpu limit:") || strings.Contains(p.Profile, "memory limit:") || strings.Contains(p.Profile, "process limit:") {
 		t.Fatalf("no limits must omit resource lines:\n%s", p.Profile)
 	}
 }

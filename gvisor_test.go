@@ -46,6 +46,9 @@ func TestGvisorNetworkPlans(t *testing.T) {
 	if !caveatsContain(p.Caveats, "UDP bind") {
 		t.Fatalf("NetOutbound caveat must mention UDP bind ambiguity: %v", p.Caveats)
 	}
+	if !caveatsContain(p.Caveats, "not an egress filter") {
+		t.Fatalf("NetOutbound caveat must mention unrestricted egress/exfiltration risk: %v", p.Caveats)
+	}
 }
 
 func TestGvisorFlagsPrecedeDo(t *testing.T) {
@@ -81,6 +84,9 @@ func TestGvisorWriteModes(t *testing.T) {
 	if !ephemeral.Uses.Has(CapFSWriteEphemeral) {
 		t.Error("WriteEphemeral should enforce fs.write.ephemeral")
 	}
+	if !caveatsContain(ephemeral.Caveats, "memory overlays keep non-persistent writes off host disk") {
+		t.Fatalf("WriteEphemeral should caveat memory overlay disk behavior: %v", ephemeral.Caveats)
+	}
 
 	scoped, err := compileGvisor(Spec{Args: []string{"x"}, Write: WriteScope, Writable: []string{"/w"}})
 	if err != nil {
@@ -97,6 +103,9 @@ func TestGvisorWriteModes(t *testing.T) {
 	}
 	if scoped.gv == nil || argvHas(scoped.Argv, "do") {
 		t.Fatalf("WriteScope should force OCI run path, argv=%v gv=%#v", scoped.Argv, scoped.gv)
+	}
+	if !caveatsContain(scoped.Caveats, "does not enforce res.disk") {
+		t.Fatalf("WriteScope should caveat missing disk quota: %v", scoped.Caveats)
 	}
 
 	overlay, err := compileGvisor(Spec{Args: []string{"x"}, Write: WriteOverlay, Writable: []string{"/work"}, AllowTemp: true})
@@ -117,6 +126,9 @@ func TestGvisorWriteModes(t *testing.T) {
 	}
 	if !caveatsContain(overlay.Caveats, "--overlay2=root:memory") {
 		t.Fatalf("WriteOverlay caveat missing overlay flag: %v", overlay.Caveats)
+	}
+	if !caveatsContain(overlay.Caveats, "does not enforce res.disk") || !caveatsContain(overlay.Caveats, "writable bind mounts still consume host disk") {
+		t.Fatalf("WriteOverlay should caveat disk quota and memory-overlay behavior: %v", overlay.Caveats)
 	}
 
 	deny, _ := compileGvisor(Spec{Args: []string{"x"}, Write: WriteNone})
@@ -452,7 +464,7 @@ func hasNamespace(values []ociNamespace, want string) bool {
 }
 
 func TestGvisorResourceLimitsForceOCIAndConfig(t *testing.T) {
-	s := Spec{Args: []string{"/bin/app"}, CPUs: 1.5, MemoryBytes: 256 << 20}
+	s := Spec{Args: []string{"/bin/app"}, CPUs: 1.5, MemoryBytes: 256 << 20, PIDs: 64}
 	p, err := compileGvisor(s)
 	if err != nil {
 		t.Fatal(err)
@@ -460,15 +472,15 @@ func TestGvisorResourceLimitsForceOCIAndConfig(t *testing.T) {
 	if p.gv == nil {
 		t.Fatal("resource limits must force the OCI bundle plan")
 	}
-	if !p.Uses.Has(CapResCPU) || !p.Uses.Has(CapResMemory) {
-		t.Fatalf("plan must use res.cpu/res.memory: %v", p.Uses.List())
+	if !p.Uses.Has(CapResCPU) || !p.Uses.Has(CapResMemory) || !p.Uses.Has(CapResPIDs) {
+		t.Fatalf("plan must use res.cpu/res.memory/res.pids: %v", p.Uses.List())
 	}
 	if !caveatsContain(p.Caveats, "host cgroup") {
 		t.Fatalf("resource enforcement caveat missing: %v", p.Caveats)
 	}
 	cfg := gvisorOCIConfig(s, p.gv, "")
 	res := cfg.Linux.Resources
-	if res == nil || res.CPU == nil || res.Memory == nil {
+	if res == nil || res.CPU == nil || res.Memory == nil || res.Pids == nil {
 		t.Fatalf("OCI linux.resources incomplete: %#v", res)
 	}
 	if res.CPU.Quota == nil || *res.CPU.Quota != 150000 {
@@ -483,6 +495,9 @@ func TestGvisorResourceLimitsForceOCIAndConfig(t *testing.T) {
 	if res.Memory.Swap == nil || *res.Memory.Swap != 256<<20 {
 		t.Fatalf("memory swap=%v, want %d", res.Memory.Swap, 256<<20)
 	}
+	if res.Pids.Limit != 64 {
+		t.Fatalf("pids limit=%v, want 64", res.Pids.Limit)
+	}
 }
 
 func TestGvisorOmitsResourcesWithoutLimits(t *testing.T) {
@@ -495,7 +510,7 @@ func TestGvisorOmitsResourcesWithoutLimits(t *testing.T) {
 	if p.gv == nil {
 		t.Fatal("NoExec should still produce an OCI plan")
 	}
-	if p.Uses.Has(CapResCPU) || p.Uses.Has(CapResMemory) {
+	if p.Uses.Has(CapResCPU) || p.Uses.Has(CapResMemory) || p.Uses.Has(CapResPIDs) {
 		t.Fatalf("no limits must not claim resource caps: %v", p.Uses.List())
 	}
 	if cfg := gvisorOCIConfig(s, p.gv, ""); cfg.Linux.Resources != nil {

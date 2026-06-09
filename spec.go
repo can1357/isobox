@@ -14,7 +14,10 @@ const (
 	NetDisable NetMode = iota
 	// NetEnable permits network access.
 	NetEnable
-	// NetOutbound permits outbound connections only (no listening/inbound).
+	// NetOutbound permits outbound connections only (no listening/inbound). It
+	// is not a domain/CIDR allowlist or egress filter; permitted outbound
+	// connections can exfiltrate data unless separately constrained by the
+	// caller or surrounding network.
 	NetOutbound
 )
 
@@ -71,8 +74,16 @@ type Spec struct {
 	Args []string
 	// Dir is the working directory for the command. Empty inherits the caller's.
 	Dir string
-	// Env is the environment as KEY=VALUE entries. Nil inherits the caller's.
+	// Env is the environment as KEY=VALUE entries. Nil inherits the caller's
+	// environment, after EnvAllow/EnvDeny filtering when configured.
 	Env []string
+	// EnvAllow lists environment variable name patterns to keep. Empty allows all
+	// names unless EnvDeny matches. Patterns are exact names or path.Match-style
+	// globs over names (for example "*_TOKEN" or "AWS_*").
+	EnvAllow EnvAllow
+	// EnvDeny lists environment variable name patterns to remove. Patterns are
+	// exact names or path.Match-style globs over names.
+	EnvDeny EnvDeny
 
 	// Net selects the network policy.
 	Net NetMode
@@ -115,6 +126,10 @@ type Spec struct {
 	// no memory limit. Backends that cannot cap memory report a caveat (and
 	// Strict rejects it).
 	MemoryBytes int64
+	// PIDs limits the number of processes/tasks in the sandbox. Zero means no
+	// process-count limit. Backends that cannot cap processes report a caveat
+	// (and Strict rejects it).
+	PIDs int64
 
 	// Strict rejects any capability outside Intersection(), guaranteeing
 	// identical enforcement across backends instead of degrading per platform.
@@ -150,6 +165,9 @@ func (s Spec) Capabilities() CapabilitySet {
 	if len(s.ReadDeny) > 0 {
 		caps = caps.Union(NewCapabilitySet(CapFSReadDeny))
 	}
+	if envScrubActive(s) {
+		caps = caps.Union(NewCapabilitySet(CapEnvScrub))
+	}
 	if s.NoExec {
 		caps = caps.Union(NewCapabilitySet(CapProcNoExec))
 	}
@@ -161,6 +179,9 @@ func (s Spec) Capabilities() CapabilitySet {
 	}
 	if s.MemoryBytes > 0 {
 		caps = caps.Union(NewCapabilitySet(CapResMemory))
+	}
+	if s.PIDs > 0 {
+		caps = caps.Union(NewCapabilitySet(CapResPIDs))
 	}
 	return caps
 }
@@ -177,6 +198,12 @@ func (s Spec) validate() error {
 		return err
 	}
 	if err := validatePathList("ReadDeny", s.ReadDeny); err != nil {
+		return err
+	}
+	if err := validateEnvPatterns("EnvAllow", s.EnvAllow); err != nil {
+		return err
+	}
+	if err := validateEnvPatterns("EnvDeny", s.EnvDeny); err != nil {
 		return err
 	}
 	if err := validatePathList("Writable", s.Writable); err != nil {
@@ -196,6 +223,12 @@ func (s Spec) validate() error {
 	}
 	if s.MemoryBytes < 0 {
 		return fmt.Errorf("isobox: MemoryBytes must not be negative")
+	}
+	if s.PIDs < 0 {
+		return fmt.Errorf("isobox: PIDs must not be negative")
+	}
+	if s.PIDs > 1<<32-1 {
+		return fmt.Errorf("isobox: PIDs must fit in a 32-bit process count")
 	}
 	if len(s.Readable) > 0 && s.Dir != "" {
 		dir := canonPath(s.Dir)

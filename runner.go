@@ -11,7 +11,9 @@ import (
 )
 
 // Stdio wires the sandboxed process's standard streams. The zero value uses the
-// caller's os.Stdin/Stdout/Stderr.
+// caller's os.Stdin/Stdout/Stderr. Passing a real terminal as stdin gives the
+// sandboxed process that terminal file descriptor; use an explicit non-terminal
+// reader when untrusted commands must not issue terminal ioctls such as TIOCSTI.
 type Stdio struct {
 	In  io.Reader
 	Out io.Writer
@@ -192,9 +194,9 @@ func runPlanExec(ctx context.Context, backend Backend, binEnv string, plan *Plan
 		cmd.Dir = runtime.Dir
 	}
 	if runtime != nil {
-		cmd.Env = commandEnv(s.Env, runtime.Env)
-	} else if s.Env != nil {
-		cmd.Env = s.Env
+		cmd.Env = finalEnv(s, runtime.Env)
+	} else if s.Env != nil || envScrubActive(s) {
+		cmd.Env = finalEnv(s, nil)
 	}
 
 	runErr := runResourceWatchedCommand(ctx, cmd, plan.resources)

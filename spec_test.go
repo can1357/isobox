@@ -125,20 +125,24 @@ func strictRejects(s Spec) bool {
 
 func TestSpecResourceCapabilities(t *testing.T) {
 	none := Spec{Args: []string{"x"}}.Capabilities()
-	if none.Has(CapResCPU) || none.Has(CapResMemory) {
+	if none.Has(CapResCPU) || none.Has(CapResMemory) || none.Has(CapResPIDs) {
 		t.Fatalf("no limits must not request resource capabilities: %v", none.List())
 	}
-	both := Spec{Args: []string{"x"}, CPUs: 1.5, MemoryBytes: 1 << 20}.Capabilities()
-	if !both.Has(CapResCPU) || !both.Has(CapResMemory) {
-		t.Fatalf("limits must request res.cpu/res.memory: %v", both.List())
+	both := Spec{Args: []string{"x"}, CPUs: 1.5, MemoryBytes: 1 << 20, PIDs: 64}.Capabilities()
+	if !both.Has(CapResCPU) || !both.Has(CapResMemory) || !both.Has(CapResPIDs) {
+		t.Fatalf("limits must request res.cpu/res.memory/res.pids: %v", both.List())
 	}
 	cpuOnly := Spec{Args: []string{"x"}, CPUs: 2}.Capabilities()
-	if !cpuOnly.Has(CapResCPU) || cpuOnly.Has(CapResMemory) {
+	if !cpuOnly.Has(CapResCPU) || cpuOnly.Has(CapResMemory) || cpuOnly.Has(CapResPIDs) {
 		t.Fatalf("CPU-only must request only res.cpu: %v", cpuOnly.List())
 	}
 	memOnly := Spec{Args: []string{"x"}, MemoryBytes: 1 << 20}.Capabilities()
-	if memOnly.Has(CapResCPU) || !memOnly.Has(CapResMemory) {
+	if memOnly.Has(CapResCPU) || !memOnly.Has(CapResMemory) || memOnly.Has(CapResPIDs) {
 		t.Fatalf("memory-only must request only res.memory: %v", memOnly.List())
+	}
+	pidsOnly := Spec{Args: []string{"x"}, PIDs: 64}.Capabilities()
+	if pidsOnly.Has(CapResCPU) || pidsOnly.Has(CapResMemory) || !pidsOnly.Has(CapResPIDs) {
+		t.Fatalf("PIDs-only must request only res.pids: %v", pidsOnly.List())
 	}
 }
 
@@ -149,7 +153,13 @@ func TestSpecValidateResourceLimits(t *testing.T) {
 	if err := (Spec{Args: []string{"x"}, MemoryBytes: -1}).validate(); err == nil {
 		t.Error("negative MemoryBytes must be rejected")
 	}
-	if err := (Spec{Args: []string{"x"}, CPUs: 1.5, MemoryBytes: 1 << 20}).validate(); err != nil {
+	if err := (Spec{Args: []string{"x"}, PIDs: -1}).validate(); err == nil {
+		t.Error("negative PIDs must be rejected")
+	}
+	if err := (Spec{Args: []string{"x"}, PIDs: 1 << 32}).validate(); err == nil {
+		t.Error("PIDs larger than Windows job-object active process limit must be rejected")
+	}
+	if err := (Spec{Args: []string{"x"}, CPUs: 1.5, MemoryBytes: 1 << 20, PIDs: 64}).validate(); err != nil {
 		t.Errorf("valid resource limits rejected: %v", err)
 	}
 	// Resource limits are portable across OS-compatible backend unions: macOS can
@@ -159,5 +169,8 @@ func TestSpecValidateResourceLimits(t *testing.T) {
 	}
 	if err := (Spec{Args: []string{"x"}, Readable: []string{"/work"}, MemoryBytes: 1 << 20, Strict: true}).validate(); err != nil {
 		t.Errorf("strict should allow a portable memory limit: %v", err)
+	}
+	if err := (Spec{Args: []string{"x"}, Readable: []string{"/work"}, PIDs: 64, Strict: true}).validate(); err != nil {
+		t.Errorf("strict should allow a portable process-count limit: %v", err)
 	}
 }
