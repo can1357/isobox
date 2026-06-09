@@ -39,6 +39,38 @@ var (
 	seatbeltDeviceWriteLiterals = []string{"/dev/null"}
 )
 
+// seatbeltTLSTrustMachServices are the Apple Mach services a client needs to
+// evaluate TLS certificate trust on macOS: trustd performs the evaluation and
+// reads the system/admin/user trust settings, and securityd (SecurityServer)
+// backs keychain access. Native-TLS stacks built on Security.framework
+// (e.g. Go's crypto/x509 platform verifier, Rust's rustls-platform-verifier)
+// fail with errSecNotAvailable (-25291, "No keychain is available") when these
+// lookups are denied, even though raw sockets still connect. isobox re-allows
+// them whenever network access is permitted so HTTPS works without a manual
+// --mach-allow.
+var seatbeltTLSTrustMachServices = []string{
+	"com.apple.trustd",
+	"com.apple.trustd.agent",
+	"com.apple.SecurityServer",
+}
+
+// mergeMachServices merges the caller's MachAllow with backend-required
+// services, dropping duplicates while preserving first-seen order.
+func mergeMachServices(user, extra []string) []string {
+	out := make([]string, 0, len(user)+len(extra))
+	seen := make(map[string]struct{}, len(user)+len(extra))
+	for _, group := range [2][]string{user, extra} {
+		for _, name := range group {
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 const isoboxEphemeralRootPlaceholder = "<isobox-ephemeral-root>"
 
 // compileSeatbelt turns a Spec into a Seatbelt (sandbox-exec) plan. It is pure:
@@ -66,12 +98,20 @@ func compileSeatbelt(s Spec) (*Plan, error) {
 	// broad no-host-IPC guarantee.
 	b.WriteString("(version 1)\n(allow default)\n(deny mach-lookup)\n")
 	uses = uses.Union(NewCapabilitySet(CapMachRestrict))
-	// Carve specific Mach services back out of the lookup denial. The
-	// allow rules must follow (deny mach-lookup) since SBPL's last match wins.
-	if len(s.MachAllow) > 0 {
-		for _, name := range s.MachAllow {
-			fmt.Fprintf(&b, "(allow mach-lookup (global-name %s))\n", sbplQuote(name))
-		}
+	// Carve specific Mach services back out of the lookup denial. Allow rules
+	// must follow (deny mach-lookup) since SBPL's last match wins.
+	machAllow := s.MachAllow
+	if s.Net == NetEnable || s.Net == NetOutbound {
+		// Networked macOS programs validate TLS certificates through
+		// Security.framework, which reaches trustd/securityd over Mach. Re-allow
+		// those services so certificate validation works without a manual
+		// --mach-allow; the rest of the Mach surface stays denied.
+		machAllow = mergeMachServices(s.MachAllow, seatbeltTLSTrustMachServices)
+		caveats = append(caveats,
+			"Seatbelt re-allows the Apple TLS trust Mach services (com.apple.trustd, com.apple.trustd.agent, com.apple.SecurityServer) while network access is enabled so Security.framework clients can validate certificates")
+	}
+	for _, name := range machAllow {
+		fmt.Fprintf(&b, "(allow mach-lookup (global-name %s))\n", sbplQuote(name))
 	}
 
 	switch s.Net {

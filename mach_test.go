@@ -49,6 +49,62 @@ func TestSeatbeltNoMachAllowEmitsNoAllow(t *testing.T) {
 	}
 }
 
+// TestSeatbeltNetAllowsTLSTrustMachServices verifies isobox re-allows the Apple
+// TLS trust Mach services whenever network access is enabled, so
+// Security.framework certificate validation works without a manual --mach-allow.
+// With network denied the services stay denied.
+func TestSeatbeltNetAllowsTLSTrustMachServices(t *testing.T) {
+	const deny = "(deny mach-lookup)"
+	for _, net := range []NetMode{NetEnable, NetOutbound} {
+		p, err := compileSeatbelt(Spec{Args: []string{"/bin/echo"}, Net: net})
+		if err != nil {
+			t.Fatalf("net=%v: %v", net, err)
+		}
+		denyAt := strings.Index(p.Profile, deny)
+		if denyAt < 0 {
+			t.Fatalf("net=%v: profile missing %q:\n%s", net, deny, p.Profile)
+		}
+		for _, svc := range seatbeltTLSTrustMachServices {
+			allow := `(allow mach-lookup (global-name "` + svc + `"))`
+			at := strings.Index(p.Profile, allow)
+			if at < 0 {
+				t.Fatalf("net=%v: profile missing %q:\n%s", net, allow, p.Profile)
+			}
+			if at < denyAt {
+				t.Fatalf("net=%v: %q must follow the deny (last match wins):\n%s", net, allow, p.Profile)
+			}
+		}
+		if !caveatsContain(p.Caveats, "Apple TLS trust Mach services") {
+			t.Fatalf("net=%v: expected TLS trust caveat, got %v", net, p.Caveats)
+		}
+	}
+
+	// Network denied: the trust services must stay denied.
+	off, err := compileSeatbelt(Spec{Args: []string{"/bin/echo"}, Net: NetDisable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, svc := range seatbeltTLSTrustMachServices {
+		if profileHas(off.Profile, svc) {
+			t.Fatalf("net=disable should not allow %q:\n%s", svc, off.Profile)
+		}
+	}
+}
+
+// TestSeatbeltMachAllowDedupesTLSTrustServices verifies an explicit --mach-allow
+// for a TLS trust service is not emitted twice once the net default adds it.
+func TestSeatbeltMachAllowDedupesTLSTrustServices(t *testing.T) {
+	dup := seatbeltTLSTrustMachServices[0]
+	p, err := compileSeatbelt(Spec{Args: []string{"/bin/echo"}, Net: NetOutbound, MachAllow: []string{dup}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allow := `(allow mach-lookup (global-name "` + dup + `"))`
+	if n := strings.Count(p.Profile, allow); n != 1 {
+		t.Fatalf("expected %q exactly once, got %d:\n%s", allow, n, p.Profile)
+	}
+}
+
 func TestMachAllowMapsToCapability(t *testing.T) {
 	plain := Spec{Args: []string{"x"}}
 	if plain.Capabilities().Has(CapMachRestrict) {

@@ -102,6 +102,9 @@ type Spec struct {
 	// for macOS programs that need directory services — for example
 	// "com.apple.system.opendirectoryd.libinfo" so getpwnam-based user lookup
 	// resolves names instead of falling back to raw uids.
+	// Independent of this list, when Net permits the network Seatbelt also
+	// re-allows the Apple TLS trust services (trustd/securityd) so
+	// Security.framework certificate validation works; see the Net docs.
 	MachAllow []string
 
 	// CPUs limits CPU usage to this many logical cores; fractional values are

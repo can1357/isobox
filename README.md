@@ -256,6 +256,15 @@ isobox.NewBackend(b)                 // a runner for a named backend, on any OS
 - `--net=outbound` is TCP-server oriented. Docker and gVisor deny
   `listen`/`accept`/`accept4`; UDP bind behavior is backend-specific and called
   out in plan caveats.
+- On macOS, Seatbelt's `mach.restrict` denies Mach service lookups, but native-TLS
+  clients (anything validating certificates through Security.framework, e.g. Go's
+  platform verifier or Rust's `rustls-platform-verifier`) need `trustd`/`securityd`
+  over Mach or they fail with `errSecNotAvailable` (-25291, "No keychain is
+  available") even though raw sockets connect. So whenever the network is enabled
+  (`--net=enable`/`outbound`), isobox automatically re-allows `com.apple.trustd`,
+  `com.apple.trustd.agent`, and `com.apple.SecurityServer`; the rest of the Mach
+  surface stays denied and the plan reports the carve-out as a caveat. Under
+  `--net=disable` (e.g. `--profile=tight`) none of these are granted.
 - On macOS, `docker-ephemeral` is an optional workaround for disposable Linux-image
   runs. Set `ISOBOX_DOCKER_IMAGE`; it isolates at the VM level unless Docker is
   configured with a `runsc` runtime.
